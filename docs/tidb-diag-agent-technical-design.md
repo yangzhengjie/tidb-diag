@@ -1,11 +1,11 @@
-# TiDB 智能故障诊断 Agent — 技术文档
+# TiDB 智能故障诊断 Agent — 技术架构与设计文档
 
-> 版本：v1.11<br>
+> 版本：v1.12<br>
 > 日期：2026-08-23<br>
 > 方案选型：Dify Agent + Diagnostic API + 阿里 SLS + Prometheus<br>
 > TiDB 目标版本：**v7.5.6**<br>
 > 关联文档：[需求文档](./tidb-diag-agent-requirements.md)<br>
-> 变更说明：与需求 v1.11 对齐（服务端时间窗、失败语义与缓存、分路径脱敏、RAG 来源版本、日志强观测、审计持久化）
+> 变更说明：与需求 v1.12 对齐（Dify 必选集群与默认/自定义时间参数），并作为开发前技术架构基线
 
 ---
 
@@ -229,18 +229,27 @@ sequenceDiagram
 - **工具与 RAG 防护**：Diagnostic API 在响应边界脱敏工具数据；L3 内容在 Embedding/入库前脱敏并校验，L1 也按同一规则扫描。Dify 的普通前置 Chatflow 节点不能拦截 Agent 内部的工具回包和检索片段，因此不能把它当成四条路径的唯一防线。
 - **模型网关最终防护**：所有 Agent 模型调用必须经过内网千问网关的确定性 payload 扫描；命中敏感原文时拒绝调用、返回安全降级并记录规则版本与事件。若现有网关无法覆盖 Agent 的每次模型调用，必须改用能显式串联「取数/检索 → 脱敏 → 模型」节点的 Workflow/应用层编排。
 
-调用 Diagnostic API 之前须得到 **配置中存在且唯一的 `cluster_id`**。时间窗按需求 §3.7：
+主 Agent / Chatflow 开始节点只暴露以下用户参数：
 
-- 有集群、无时间（含「刚刚 / 刚才 / 最近」）→ 首个取数请求传 `time_preset=recent_15m`，由 API 按服务端时钟解析，**不追问时间**；响应的 `effective_start_time` / `effective_end_time` 供本回合后续工具复用，该窗自动 cache bust。
-- 单一时刻无时长时，下界为锚点前 15 分钟，上界为 `min(锚点后 15 分钟, API now)`；锚点超过 now+60s 时须纠正。
-- 「从 X 起 / X 开始」按 `[X, API now]` 解释，不按孤立时刻处理；超过 2h 时须请用户确认子窗。语义无法判定时先追问。
-- 「今天 / 上午 / 下午」先映射日历区间；当前时刻落在区间内则上界改为 now。当前早于区间起点（含 09:00 前说“今天”）时须确认日期/窗口，不得查询未来。映射后 **>2h** 必须请用户缩小并确认，禁止按 3h/6h 查询或静默截断。
-- 窗口 >2h：不要截断，请用户缩小（API 会 400 `window_too_large`）。
-- 仅 **缺集群且无唯一映射** 时追问（至多 2 次），仍缺则信息不足报告，**不调** health / logs / slow_query / metrics。
+| 参数 | Dify 控件 | 规则 |
+|------|-----------|------|
+| `cluster_id` | Select，必填 | 无默认值；label 使用配置中的 `display_name`，value 使用稳定 `cluster_id` |
+| `time_mode` | Select，必填 | `recent_15m` / `custom`，默认 `recent_15m` |
+| `start_time` | DateTime 或受校验文本 | 仅 `custom` 显示并必填；提交前转换为带偏移的 RFC3339 |
+| `end_time` | DateTime 或受校验文本 | 仅 `custom` 显示并必填；提交前转换为带偏移的 RFC3339 |
+
+v1 不暴露 `db_name`、`symptom_type`、组件、指标、关键词、`cache_bust` 或模型参数。诊断分类、工具组合和关键词仍由 Agent 按 SOP 从对话线索生成。
+
+参数处理顺序：
+
+1. 校验 `cluster_id` 属于本次发布的选项；标准页面缺值时禁止提交，非标准入口缺值时输出信息不足报告且不调工具。
+2. `time_mode=recent_15m` 时清空绝对时间，首个工具传 `time_preset=recent_15m`；API 返回的 `effective_*` 供后续工具复用。
+3. `time_mode=custom` 时两个时间均必填，转换为 RFC3339 后校验顺序、未来偏移与 ≤2h；失败时不取数。
+4. 对话提到的集群或时间与参数不一致时请用户确认并更新参数，禁止模型静默覆盖。
 
 所有工具请求必须带 `X-Conversation-Id`。P0 须验证 Dify 能否注入；不能则由 Workflow/应用层生成并写入，API 不得兜底生成，缺省始终返回 400。鼓励带 `X-Diag-Round-Id`；不能注入时可走 API 的 15 分钟回合兜底。
 
-部署流水线从 Diagnostic API 的集群配置生成 Dify 只读 alias 变量，并校验 `config_digest`；禁止在 Dify 中人工维护第二份映射。Agent 报告与轨迹均记录该 digest。
+部署流水线从 Diagnostic API 的集群配置和当前 `diagnostic_reader.allowed_clusters` 生成 Dify `cluster_id` 选项，并校验 `config_digest`；禁止在 Dify 人工维护第二份列表。若原生 Agent 不能由流水线维护动态选项，则使用 Chatflow 包装的开始节点承载这些参数。前端选项不构成授权，Diagnostic API 仍按 Key 二次校验。Agent 报告与轨迹均记录该 digest。
 
 ### 2.2 工具清单（OpenAPI 导入）
 
@@ -272,9 +281,9 @@ v1 **仅**导入以下 4 个工具。不导入 Alertmanager，不调用 Dashboar
 - 引用知识库必须写标题、章节、源 URL、source_version、kb_snapshot_id、chunk_id
 
 # 必做集合（推荐顺序 1→6；RAG 可在阶段 1 之后与取数并行）
-1. 现象澄清：必须有唯一 cluster_id。缺集群且无唯一映射则追问，最多 2 次；仍缺则信息不足报告，禁止猜测，不要调用 health / logs / slow_query / metrics。
-   有集群、无时间（刚刚/刚才/最近/未给）：首个取数请求传 time_preset=recent_15m，由 API 解析；后续工具复用 API 返回的实际起止时间，不要追问时间，也不要用模型时钟自行拼窗。
-   「今天/上午/下午」先映射时段；超过 2h 必须请用户确认子窗，禁止按 12:00–18:00 直接查询。
+1. 参数校验与现象澄清：只使用已校验的 cluster_id 参数，不从用户文本猜集群。参数缺失、非法或冲突未确认时输出信息不足报告，不要调用 health / logs / slow_query / metrics。
+   time_mode=recent_15m：首个请求传 time_preset=recent_15m，由 API 解析；后续工具复用 API 返回的实际起止时间，不要用模型时钟拼窗。
+   time_mode=custom：使用已校验的 start_time/end_time。缺任一时间、顺序错误、未来超限或窗口 >2h 时停止取数并请用户修正。
 2. 健康快照：必须调用 get_cluster_health + 场景矩阵中的相关 metric 模板。只陈述当前值与对比窗口（查询窗紧前的等长窗），不要自行定级「健康/不健康」。
    health 与 query_prometheus 同属 Prometheus 一类，不能据此标「高」。
 3. 分类取数：按可用性 / 读性能 / 锁或写入 选择 logs 与/或 slow_query。
@@ -294,7 +303,7 @@ v1 **仅**导入以下 4 个工具。不导入 Alertmanager，不调用 Dashboar
 - 每个诊断回合 Diagnostic API 不超过 12 次（知识库检索不计）；用户新消息并再次取数后重新计数
 - 只使用预置模板名，不要编造 PromQL
 - 时间窗最长 2 小时，超出请用户缩小，禁止静默截断
-- 「刚刚/最近」用近 15 分钟；时段话术超 2h 先问用户
+- time_mode 只允许 recent_15m/custom；不得同时向工具传预置与绝对时间
 - 必须满足 start_time < end_time；end_time 最多允许超过 API now 60 秒，更晚须请用户纠正
 - 正在发生的故障（无结束时间，或合法的 end_time > now−10min）会自动 bust；也可传 cache_bust=true
 
@@ -396,10 +405,10 @@ Region 不可用通常与 TiKV/PD 故障或网络分区相关……
 
 启用后：
 
-1. Workflow 节点固定：解析输入（可人工确认集群/时间）→ `get_cluster_health` → `query_prometheus` → `fetch_component_logs` → `analyze_slow_query` → RAG → 报告模板。
+1. Workflow 节点固定：校验 `cluster_id` / 时间参数（冲突时人工确认）→ `get_cluster_health` → `query_prometheus` → `fetch_component_logs` → `analyze_slow_query` → RAG → 报告模板。
 2. Agent 仅负责阶段 1 解析与阶段 5–6 写作，或整段改走 Workflow。
 3. 工具 Header 必传 `X-Conversation-Id`；有则传 `X-Diag-Round-Id`。
-4. 无唯一集群则停在解析节点，出信息不足报告，不进入取数。
+4. 参数缺失、非法或冲突未确认时停在校验节点，出信息不足报告，不进入取数。
 5. **P2 交付** 该 Workflow 与覆盖 G1/G2/G3 的最小官方 RAG 包，默认关闭；P3 补齐完整知识库。触发后只改入口。
 
 ---
@@ -420,11 +429,7 @@ Region 不可用通常与 TiKV/PD 故障或网络分区相关……
 ### 3.2 集群配置示例
 
 ```yaml
-config_version: "2026-08-22.1"
-default_cluster_id: null          # 仅当 P0 书面指定单集群时填写，例如 prod-01
-db_aliases:
-  orders: [prod-01]               # 单元素列表可唯一解析
-  # shared: [prod-01, prod-02]    # prod-02 也定义于 clusters 时有效；多元素保持歧义，Agent 必须追问
+config_version: "2026-08-23.1"
 timezone: Asia/Shanghai
 max_window_seconds: 7200          # 含 7200；超过则 400，不截断
 max_future_skew_seconds: 60       # 超过 API now 60s 则 400 future_window
@@ -465,7 +470,7 @@ clusters:
       # 模板见 §5.3；此处只覆盖集群 label。禁止配置任意 PromQL 入口
 ```
 
-API **只接受** 配置中存在的 `cluster_id`（否则 400 `unknown_cluster`）。每个 alias 的值是非空 `cluster_id` 列表，且所有元素必须存在于 `clusters`；单元素可唯一解析，多元素必须追问。该 YAML/配置中心是 alias 的唯一事实源；发布流水线对「解析后的集群/alias 配置 + 完整 Prom 模板定义 + 证据阈值 + 脱敏规则版本」作规范化后计算 SHA-256 `config_digest`，不能只对 YAML 文件文本求 hash。流水线从同一制品生成 Dify 只读变量，且变量中的集群集合必须是 `diagnostic_reader.allowed_clusters` 的子集；部署前比较两侧 digest，不一致则阻止发布。Agent 不得在映射不唯一时挑一个；v1 不额外提供 alias 解析接口。
+API **只接受** 配置中存在的 `cluster_id`（否则 400 `unknown_cluster`）。该 YAML/配置中心是集群 ID 与展示名的唯一事实源；发布流水线对「解析后的集群配置 + 当前应用 `allowed_clusters` + Dify 参数定义/选项 + 完整 Prom 模板定义 + 证据阈值 + 脱敏规则版本」作规范化后计算 SHA-256 `config_digest`，不能只对 YAML 文件文本求 hash。流水线按当前 Dify 应用的 `diagnostic_reader.allowed_clusters` 取交集，生成 `{label: display_name, value: cluster_id}` 下拉选项；空集合、重复 value、重复/缺失 label 或选项/digest 不一致均阻止发布。即使参数来自受控下拉框，API 仍先按 Key 授权域校验，防止篡改请求枚举或访问其他集群。
 
 ### 3.3 核心 API 定义
 
@@ -684,7 +689,7 @@ Diagnostic API 除返回原始数据外，应提供 **面向融合的摘要字�
 | `effective_start_time` / `effective_end_time` | API 实际执行的绝对窗口；默认预置解析后也必须返回 |
 | `data_watermark` / `observed_delay_seconds` | 本次结果可见的最新数据时间及相对 API now 的实测延迟；无法测量时返回 `null` 并给配置型 `data_delay_hint` |
 | `cache_hit` / `cache_bypass_reason` | 是否命中缓存，以及未读缓存的原因（`active_window` / `explicit_bust` / `miss`） |
-| `config_digest` | 解析后的集群/alias、完整 Prom 模板、证据阈值与脱敏规则版本的规范化 SHA-256 |
+| `config_digest` | 集群/展示名、当前应用授权集群、Dify 参数定义/选项、完整 Prom 模板、证据阈值与脱敏规则版本的规范化 SHA-256 |
 | `response_hash` | 对脱敏后的规范化响应计算的 SHA-256；审计侧不必保存敏感响应正文即可核对证据版本 |
 
 示例（`fetch_component_logs` 响应扩展）：
@@ -742,7 +747,7 @@ HTTP 非 2xx 统一返回错误信封，不得复用 `source_status`：
 
 - 每次请求写入审计：工具名、脱敏后的参数摘要、每个子查询状态、`source_status` 或 `failure_scope`、`cache_hit` / `cache_bypass_reason`、`round_id`、实际时间窗、数据水位、`config_digest`、脱敏响应 `response_hash`、适配器/脱敏规则版本。
 - 提供只读 `GET /api/v1/diag/traces?cluster_id=&conversation_id=&round_id=`（仅 `auditor`）供 P2+ 金标准验收导出，三个查询参数均必填。服务端先校验 `cluster_id` 属于 Auditor 的 `allowed_clusters`，再按该集群过滤记录，避免跨集群存在性泄漏。`X-Conversation-Id` 只记审计员本次操作（可填 `audit`），不要求与被查会话相同。接口只返回脱敏轨迹，不返回原始 SQL/日志。
-- Dify 测评导出包在 API 轨迹之外记录输入脱敏规则版本、模型网关扫描结果、Prompt hash、主模型标识与参数、`kb_snapshot_id`、检索 chunk_id/content_hash/score/source_url、公开夹具/盲测集 hash；以 `conversation_id + round_id` 合并成可复现记录。
+- Dify 测评导出包在 API 轨迹之外记录原始结构化参数及确认后的参数、输入脱敏规则版本、模型网关扫描结果、Prompt hash、主模型标识与参数、`kb_snapshot_id`、检索 chunk_id/content_hash/score/source_url、公开夹具/盲测集 hash；以 `conversation_id + round_id` 合并成可复现记录。
 - **G7 注入**（仅非生产）：对指定 `cluster_id` 设置 `faults.sls_timeout: true` 或请求头 `X-Test-Fault: sls_timeout` → SLS 返回 `source_status=error`，Prom 仍 `ok`。对偶：`X-Test-Fault: prom_timeout`。生产环境出现该头 → 403 `test_fault_forbidden`。
 
 ---
@@ -882,8 +887,8 @@ sequenceDiagram
     participant S as SLS
     participant KB as 知识库
 
-    U->>A: 订单库查询变慢
-    A->>A: 映射 orders → 唯一集群 prod-01，锚定 ≤2h 时间窗（无时间则 recent_15m）
+    U->>A: 选择 prod-01 与时间参数，描述订单库查询变慢
+    A->>A: 校验 cluster_id 与 ≤2h 时间窗；提取 orders 作为查询线索
     A->>API: get_cluster_health / query_prometheus(tidb_p99)
     API->>P: 只读 PromQL 模板
     P-->>API: 当前值 + 对比窗口
@@ -1037,15 +1042,17 @@ flowchart LR
 
 ## 10. Dify 配置步骤
 
-1. **分路径防护**：在主 Agent 前配置用户输入确定性脱敏；工具响应由 API 脱敏；RAG 入库前扫描。所有模型调用接入具备确定性扫描与失败关闭的内网模型网关，用 G14 同时验证“正常脱敏后可诊断”和“漏网标记被阻断”。只有合规 OCR + 脱敏链路通过时才开启图片
-2. **Integrations → Model**：配置内网千问（§2.5）
-3. **Knowledge → 创建知识库**：P2 先导入 G1/G2/G3 最小包，P3 按 §2.4.1 补齐；配置 Embedding + Rerank；为导入生成 `kb_snapshot_id`，保留真实 `source_version`、`chunk_id` 与 `content_hash`
-4. **Integrations → Tools → 自定义 API**：导入 4 个 Must 工具的 OpenAPI（不要导入 alerts）
-5. **配置生成**：发布流水线从 Diagnostic API 唯一配置生成 Dify alias 只读变量并校验 `config_digest`，禁止人工双写
-6. **Credential**：Base URL + `diagnostic_reader` Key；Header 映射 `X-Conversation-Id` = 当前会话 ID；能则映射 `X-Diag-Round-Id`（每条用户新消息新值，不写进 Prompt）。`auditor` Key 不配置到 Agent
-7. **创建 Agent**：绑定模型、4 工具、知识库、§2.3 Prompt；发布物记录 Prompt hash、模型参数与知识库版本
-8. 验证 Function Calling；达到 §2.6 定义的失败率才启用 Workflow
-9. **发布**：内网 URL 或嵌入运维门户
+1. **输入参数**：在 Agent 开始表单或 Chatflow 包装层配置 `cluster_id`、`time_mode`、`start_time`、`end_time`；不配置 `db_name` 或 `symptom_type`
+2. **分路径防护**：在主 Agent 前配置用户输入确定性脱敏；工具响应由 API 脱敏；RAG 入库前扫描。所有模型调用接入具备确定性扫描与失败关闭的内网模型网关，用 G14 同时验证“正常脱敏后可诊断”和“漏网标记被阻断”。只有合规 OCR + 脱敏链路通过时才开启图片
+3. **Integrations → Model**：配置内网千问（§2.5）
+4. **Knowledge → 创建知识库**：P2 先导入 G1/G2/G3 最小包，P3 按 §2.4.1 补齐；配置 Embedding + Rerank；为导入生成 `kb_snapshot_id`，保留真实 `source_version`、`chunk_id` 与 `content_hash`
+5. **Integrations → Tools → 自定义 API**：导入 4 个 Must 工具的 OpenAPI（不要导入 alerts）
+6. **配置生成**：发布流水线从 Diagnostic API 唯一配置生成 Dify 集群下拉选项并校验 `config_digest`；选项 value 必须是当前 Key 授权的 `cluster_id`，禁止人工双写
+7. **Credential**：Base URL + `diagnostic_reader` Key；Header 映射 `X-Conversation-Id` = 当前会话 ID；能则映射 `X-Diag-Round-Id`（每条用户新消息新值，不写进 Prompt）。`auditor` Key 不配置到 Agent
+8. **创建 Agent**：绑定模型、4 工具、知识库、§2.3 Prompt；发布物记录参数定义、Prompt hash、模型参数与知识库版本
+9. **参数验收**：验证必选集群、`recent_15m`、自定义窗口、参数/文本冲突、篡改集群二次鉴权和 >2h 拒绝
+10. 验证 Function Calling；达到 §2.6 定义的失败率才启用 Workflow
+11. **发布**：内网 URL 或嵌入运维门户
 
 ---
 
@@ -1056,7 +1063,7 @@ flowchart LR
 | 阶段 | 技术交付物 |
 |------|-----------|
 | P1 | Go 服务骨架；分离的 `diagnostic_reader`/`auditor` Key + **必填 Conversation-Id**；集中持久化审计与按集群过滤的轨迹；限流与 **12 次/诊断回合**；**5 分钟缓存 + 活跃窗自动 bust + 失败不缓存**；`recent_15m` 服务端解析与实际窗口回传；时间窗顺序/未来/≤2h 校验；错误信封 `failure_scope`；`metrics/query`、`cluster/health`、`logs/fetch`；OpenAPI 3.0；Must 模板闭集与 `partial` 子状态 |
-| P2 | `slow-query/analyze`（raw + SQL AST 失败关闭脱敏骨架/安全派生特征）；Dify 用户输入防护 + 模型网关最终扫描 + Agent + **4 工具**；§2.3 Prompt；FC 验证；单一来源 alias 生成；G1/G2/G3 最小 RAG 快照；**Plan B Workflow 已交付、默认关闭**；使用已冻结公开夹具/盲测 hash；轨迹导出接口；G1/G2/G5/G13/G14 行为可跑通 |
+| P2 | `slow-query/analyze`（raw + SQL AST 失败关闭脱敏骨架/安全派生特征）；Dify 参数表单 + 用户输入防护 + 模型网关最终扫描 + Agent + **4 工具**；§2.3 Prompt；FC 验证；单一配置生成集群选项；G1/G2/G3 最小 RAG 快照；**Plan B Workflow 已交付、默认关闭**；使用已冻结公开夹具/盲测 hash；轨迹导出接口；G1/G2/G5/G13/G14 行为可跑通 |
 | P3 | 完整离线 MD 包；真实来源版本、`kb_snapshot_id` 与 chunk content hash；Embedding/Rerank；全部公开夹具及 G1–G8/G6a/G14 盲测均通过；G13/G14 复测 |
 | P4 | **仅当客户批准**：SLS 加工规则、`tidb-slow-parsed`、API 切 parsed。未批准则跳过 |
 | P5 | §7 隔离检查证据；脱敏抽测；安全抽测（不承诺正式渗透）；运维/用户手册；上线 Checklist |
@@ -1078,7 +1085,7 @@ flowchart LR
 | 应用级身份 | 认证到 Dify API Key + 会话，不到自然人 |
 | 诊断回合 | 一次取数到出报告；`X-Diag-Round-Id` 计数 4 个 Diagnostic API，上限 12；RAG 不计 |
 | 强观测 | 与根因假设相关且达到冻结阈值的观测；`partial` 仅在所需子查询均成功时可参与 |
-| `config_digest` | 唯一配置制品规范化后的 SHA-256，用于绑定 alias、Prom 模板和证据阈值版本 |
+| `config_digest` | 唯一配置制品规范化后的 SHA-256，用于绑定集群选项、Dify 参数、Prom 模板和证据阈值版本 |
 | `kb_snapshot_id` | 一次知识库导入快照的不可变标识；配合 chunk `content_hash` 复现模型引用的知识内容 |
 
 ## 附录 B. 文档维护
@@ -1099,6 +1106,7 @@ flowchart LR
 | v1.9 | 2026-08-22 | 对齐需求 v1.9：slow-query 改绝对时间窗；取消任意 PromQL；health 对比窗唯一定义；Must 模板闭集；Plan B 触发条件；日志脱敏；部署不承诺 HA；P1 含缓存 |
 | v1.10 | 2026-08-22 | 对齐联合评审：全输入模型前脱敏；SOP/验收矩阵；`partial` 与量化证据；单一配置源；两类 Key；时间/压测边界；可复现轨迹、最小 RAG 与独立盲测 |
 | v1.11 | 2026-08-23 | 文档评审修订：默认窗由 API 解析并回传；源状态与 HTTP 错误分离；失败不缓存；分路径脱敏与模型网关失败关闭；RAG 来源版本/快照；日志强观测量化；审计集中持久化 |
+| v1.12 | 2026-08-23 | Dify 参数化：必选 `cluster_id` 下拉、`recent_15m`/自定义时间；配置生成选项、冲突确认与 API 二次鉴权；不暴露库名和故障类型参数；明确为开发前技术架构基线 |
 
 ---
 
