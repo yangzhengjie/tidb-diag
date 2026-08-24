@@ -1,11 +1,11 @@
 # TiDB 智能故障诊断 Agent — 技术架构与设计文档
 
-> 版本：v1.17<br>
-> 日期：2026-08-23<br>
+> 版本：v1.18<br>
+> 日期：2026-08-24<br>
 > 方案选型：Dify Agent + Diagnostic API + 阿里 SLS + Prometheus<br>
 > TiDB 目标版本：**v7.5.6**<br>
 > 关联文档：[需求文档](./tidb-diag-agent-requirements.md)<br>
-> 变更说明：v1.17 对齐需求官网问题点闭环；补充 Prompt/RAG 分工与开场路由
+> 变更说明：v1.18 移除 Plan B（Workflow 固定采集），与需求同步
 
 ---
 
@@ -78,8 +78,8 @@ flowchart TB
 5. **RAG 以 `docs/docs-cn`（`release-7.5`）为主**：按需求附录 D **一块一文** 离线导入问题点原文与解决建议；Prompt 只放目录索引与闸门，不放整篇官网。
 6. **融合分析**：将 SLS/Prom **观测证据** 与已检索的官方问题点对照；未命中问题点 + 解决建议不得确认根因；用户线索不计入置信度（见需求 §3.3.3、§3.4）。
 7. **v1 不接入 Alertmanager / Dashboard API**。
-8. **Plan B**（条件 Must）：按需求 §3.10 触发后，用 Dify Workflow 固定 `health → metrics → logs → slow_query → RAG → 报告`。
-9. **内网模型部署**：千问与 Dify 同处内网；v1 **不做**输入/输出脱敏或模型网关敏感扫描。
+8. **内网模型部署**：千问与 Dify 同处内网；v1 **不做**输入/输出脱敏或模型网关敏感扫描。
+9. **v1 不交付 Workflow 固定采集**（原 Plan B）；只走 Dify Agent + Function Calling。
 
 ### 1.2 设计思路
 
@@ -208,7 +208,6 @@ sequenceDiagram
 ### 2.1 应用类型与用户输入
 
 - **主应用**：Agent 应用（Chat）。文字为 Must；文件/图片上传为 Should，主路径不依赖识图。
-- **Plan B**：Workflow「标准采集」按需求 §3.10 触发后启用，不是 v1 默认入口。
 - **图片（Should）**：启用时经 OCR 将截图转为文字线索；未启用则请用户改贴文字。v1 不做 OCR 输出脱敏。
 
 主 Agent / Chatflow 开始节点只暴露以下用户参数：
@@ -450,7 +449,7 @@ v1_scope: Must
 | 1 可选宽检索 | 阶段 1 之后，可与取数并行 | 错误码，或「连接超时」「慢查询」 | 阅读材料，**不得**确认根因 |
 | 2 必做定向检索 | 观测收敛后、出第 5/6 节前 | `P-AVAIL-9005`、`P-READ-SLOW 官方 解决建议` | 必须能引用该问题点的解决建议 |
 
-Agent 与 Plan B 的 RAG 节点优先用 `problem_id`，不要用「TiDB 故障怎么办」。API 的 `suggested_rag_queries` 应优先返回附录 D ID 与错误码，而不是宽泛现象词。
+Agent 检索优先用 `problem_id`，不要用「TiDB 故障怎么办」。API 的 `suggested_rag_queries` 应优先返回附录 D ID 与错误码，而不是宽泛现象词。
 
 未命中或 `has_solution=false`：官方依据不足，仍可出九段证据。
 
@@ -463,30 +462,7 @@ Agent 与 Plan B 的 RAG 节点优先用 `problem_id`，不要用「TiDB 故障�
 | Agent 主推理 | Qwen3.5-122B-A10B-FP8（或同级内网千问） | temperature=0.3，top_p=0.8 |
 | Embedding | Qwen3-Embedding-4B | 默认 |
 | Rerank | Qwen3-Reranker-4B | Top-K=5，Rerank 后 Top-3 |
-| 模式 | Function Calling 优先；失败则 ReAct 或 §2.6 Workflow | — |
-
-### 2.6 Plan B：Workflow 固定采集
-
-触发条件（需求 §3.10，满足 **任一** 即切换，并写入当次交付说明）：
-
-1. 金标准 G1–G3 连续 **2** 轮出现「未调用该用例必做工具却出完整九段报告」；
-2. P2 联调样本 ≥10 个完整会话；以需求 §3.3.1 场景矩阵中的预期必调工具次数为分母，以未发请求、协议错误、模型拒绝调用或非数据源原因失败次数为分子，失败率 ≥30%。数据源返回 `empty` / `error` / `partial` 不计 FC 失败。
-
-启用后：
-
-1. Workflow 节点固定：**参数校验**（确定性；见下）→ `get_cluster_health` → `query_prometheus`（补查）→ `fetch_component_logs` → `analyze_slow_query` → **按 problem_id 定向 RAG** → 报告模板。无线索时规则节点在 health 之后才定粗分类；RAG 不得用开场宽词确认根因。
-2. **参数校验硬停**：`cluster_id` / 时间参数缺失、非法、冲突未确认，或用户问题属于需求 §3.3.2 超出范围时，Workflow **不得**进入四工具取数节点；分别输出信息不足报告或超出范围说明。
-3. **`query_prometheus` 补查规则**（与 health 分工，避免重复消耗回合配额）：
-   - `get_cluster_health` **必调**，已覆盖 7 个 Must 模板及紧前对比窗。
-   - `query_prometheus` **最多 1 次**：由 Workflow 规则节点按需求 §3.3.1 场景分类，从该场景「必查 Prom」中选 **1 个** health 子查询未成功返回有效序列的模板；若 health 已对该模板返回 `ok` 或 `empty`，**跳过**此次 metrics 调用。
-   - 分类与模板映射示例：可用性 → `tidb_connections`；读性能 → `tidb_p99`；锁/写入 → `tikv_latch_wait` 或 `tikv_write_duration`（按 P0 冻结的 G3 方向）；无法分类时默认 `tidb_p99`。
-   - Plan B **不得**遍历多个 metric 模板；Should 级资源模板（`node_*`）不在 Plan B 默认路径中。
-4. **`fetch_component_logs` / `analyze_slow_query`**：组件、关键词、`db` 由规则节点按 §3.3.1 矩阵填充；慢查节点始终存在，但信息不足/超出范围分支不得到达。
-5. Agent 仅负责阶段 1 线索解析与阶段 5–6 写作，或整段改走 Workflow。
-6. 工具 Header 必传 `X-Conversation-Id`；有则传 `X-Diag-Round-Id`。
-7. **P2 交付** 该 Workflow 与覆盖 G1/G2/G3 对应附录 D 问题点的最小官方 RAG 包，默认关闭；P3 补齐附录 D 全量 Must。触发后只改入口。报告节点仍须遵守：无问题点引用不得确认根因。
-
-Plan B 单回合典型调用预算：`health`(1) + 补查 metrics(0–1) + `logs`(1) + `slow_query`(1) = **3–4 次**，仍受 12 次/回合上限约束。
+| 模式 | Function Calling 优先；失败则 ReAct。v1 **不**切换 Workflow 固定采集 | — |
 
 ---
 
@@ -1068,7 +1044,7 @@ flowchart LR
 6. **Credential**：Base URL + 共享 Key；通过 `X-API-Key` 发送。Header 映射 `X-Conversation-Id` = 当前会话 ID；能则映射 `X-Diag-Round-Id`（每条用户新消息新值，不写进 Prompt）
 7. **创建 Agent**：绑定模型、4 工具、知识库、§2.3.3 Prompt（含附录 D 索引与开场路由）；发布物记录参数定义、Prompt hash、模型参数与知识库版本
 8. **参数验收**：验证必选集群、`recent_15m`、自定义窗口、参数/文本冲突、未知集群拒绝和 >2h 拒绝
-9. 验证 Function Calling；达到 §2.6 定义的失败率才启用 Workflow
+9. 验证 Function Calling；v1 不启用 Workflow 固定采集
 10. **发布**：内网 URL 或嵌入运维门户
 
 ---
@@ -1080,7 +1056,7 @@ flowchart LR
 | 阶段 | 技术交付物 |
 |------|-----------|
 | P1 | Go 服务骨架；共享 Key 基本认证 + **必填 Conversation-Id**；限流与 **12 次/诊断回合**；**5 分钟缓存 + 活跃窗自动 bust + 失败不缓存**；`recent_15m` 服务端解析与实际窗口回传；时间窗顺序/未来/≤2h 校验；错误信封 `failure_scope`；`metrics/query`、`cluster/health`、`logs/fetch`；OpenAPI 3.0；Must 模板闭集与 `partial` 子状态 |
-| P2 | `slow-query/analyze`（raw + 慢查字段解析）；Dify 参数表单 + Agent + **4 工具**；§2.3 Prompt（含索引与开场路由）；FC 验证；单一配置生成集群选项；G1/G2/G3 对应问题点最小 RAG；**Plan B Workflow 已交付、默认关闭**；使用已冻结公开夹具/盲测 hash；Dify 调用记录与测评导出；G1/G2/**G3**/G5/G13 行为可跑通（G3 根因严格打分延至 P3）；G2 夹具端到端取数 P95 实测记录 |
+| P2 | `slow-query/analyze`（raw + 慢查字段解析）；Dify 参数表单 + Agent + **4 工具**；§2.3 Prompt（含索引与开场路由）；FC 验证；单一配置生成集群选项；G1/G2/G3 对应问题点最小 RAG；使用已冻结公开夹具/盲测 hash；Dify 调用记录与测评导出；G1/G2/**G3**/G5/G13 行为可跑通（G3 根因严格打分延至 P3）；G2 夹具端到端取数 P95 实测记录 |
 | P3 | 附录 D Must 问题点一块一文；真实来源版本、`problem_id`、`kb_snapshot_id` 与 chunk content hash；Embedding/Rerank；全部公开夹具及 G1–G8/G6a/G15 盲测均通过；G13 复测 |
 | P4 | **仅当客户批准**：SLS 加工规则、`tidb-slow-parsed`、API 切 parsed。未批准则跳过 |
 | P5 | §7 隔离检查证据；基本认证抽测；运维/用户手册；上线 Checklist |
@@ -1130,6 +1106,7 @@ flowchart LR
 | v1.14 | 2026-08-23 | 评审补丁：Plan B 指标补查与校验硬停；时序图增加参数校验节点；P2 纳入 G3 与 G2 端到端 P95；对齐需求 §3.5.2 安全拦截报告 |
 | v1.15 | 2026-08-23 | 内网千问部署：移除脱敏、模型网关敏感扫描、G14；慢查返回完整 SQL；§8 收敛为基本认证 |
 | v1.17 | 2026-08-23 | 对齐需求 v1.17：Prompt/RAG 分工、开场路由、按 problem_id 分块与两段检索；入库清单改为 docs-cn；去掉不存在的 troubleshoot-tikv/pd 页；P3 含 G15 |
+| v1.18 | 2026-08-24 | 移除 §2.6 Plan B（Workflow 固定采集）及 P2 固定采集交付；与需求 v1.18 同步 |
 
 ---
 
