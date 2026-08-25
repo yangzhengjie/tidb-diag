@@ -1,11 +1,11 @@
 # TiDB 智能故障诊断 Agent — 技术架构与设计文档
 
-> 版本：v1.18<br>
+> 版本：v1.19<br>
 > 日期：2026-08-24<br>
 > 方案选型：Dify Agent + Diagnostic API + 阿里 SLS + Prometheus<br>
 > TiDB 目标版本：**v7.5.6**<br>
 > 关联文档：[需求文档](./tidb-diag-agent-requirements.md)<br>
-> 变更说明：v1.18 移除 Plan B（Workflow 固定采集），与需求同步
+> 变更说明：v1.19 对齐需求一个月交付窗口：取消原 P4/P5，慢查仅 raw，金标准与 Must 问题点收窄
 
 ---
 
@@ -74,7 +74,7 @@ flowchart TB
 1. **Dify 不直连 SLS/Prometheus/生产主要服务组件**，只调用 Diagnostic API。
 2. **Diagnostic API 只读观测中台**，只读查询 SLS 与 Prometheus。
 3. **生产主要服务组件零改动**（复用已有 SLS 采集与 Prom scrape，不新增对 TiDB/TiKV/PD/TiFlash 的访问）。
-4. **慢日志**：短期 API 解析 SLS 原始行；中期 SLS 加工出结构化 logstore。
+4. **慢日志**：v1 **只**在 API 侧解析 SLS raw；SLS 加工结构化 logstore 留 v2。
 5. **RAG 以 `docs/docs-cn`（`release-7.5`）为主**：按需求附录 D **一块一文** 离线导入问题点原文与解决建议；Prompt 只放目录索引与闸门，不放整篇官网。
 6. **融合分析**：将 SLS/Prom **观测证据** 与已检索的官方问题点对照；未命中问题点 + 解决建议不得确认根因；用户线索不计入置信度（见需求 §3.3.3、§3.4）。
 7. **v1 不接入 Alertmanager / Dashboard API**。
@@ -135,10 +135,9 @@ flowchart TB
 
 #### 1.2.4 渐进式交付
 
-1. **P1–P2**：Diagnostic API + Dify 联调 → 先跑通「日志 + 指标 + 慢查 + 对话」主链路。
-2. **P3**：按问题点导入知识库 + 开场路由 Prompt → 从「能查数据」升级到「能按官网问题点出报告」。
-3. **P4**：SLS 慢查结构化 → 解决 raw 解析性能瓶颈，**仍不触达生产 TiDB**。
-4. **v2+**：告警联动、Dashboard 代理、文档 ETL、用户级身份等 → 在 v1 稳定后再扩展。
+1. **P1–P2**（各 1 周）：Diagnostic API + Dify 联调 → 先跑通「日志 + 指标 + 慢查 raw + 对话」。
+2. **P3**（1 周）：导入附录 D Must（G1/G2/G3 共 4 个问题点）+ 金标准打分 + 隔离核查上线。
+3. **v2+**：SLS 慢查加工、告警联动、Dashboard 代理、扩大附录 D 等。
 
 ### 1.3 各模块职责与设计缘由
 
@@ -239,7 +238,7 @@ v1 **仅**导入以下 4 个工具。不导入 Alertmanager，不调用 Dashboar
 | 工具名 | 功能 | 数据源 |
 |--------|------|--------|
 | `fetch_component_logs` | 按集群/组件/时间/关键词查运行日志 | SLS runtime logstore |
-| `analyze_slow_query` | 慢查询 Top N、聚合分析 | SLS slow logstore（raw/parsed） |
+| `analyze_slow_query` | 慢查询 Top N、聚合分析 | SLS slow logstore（**仅 raw**） |
 | `query_prometheus` | 按预置模板查指标（**不接受**任意 PromQL） | Prometheus |
 | `get_cluster_health` | 关键指标当前值 + 对比窗口 | Prometheus |
 
@@ -308,12 +307,9 @@ health + 该类（或 Must 相关）指标
 - 引用知识库必须写 problem_id、标题、章节、源 URL 或 docs-cn 路径、source_version、kb_snapshot_id、chunk_id
 
 # 官方问题点索引（闭集，只作路由，不作正文）
-P-AVAIL-9005 可用性 | P-AVAIL-PD 可用性 | P-AVAIL-CONN 可用性 | P-AVAIL-9001 可用性 | P-AVAIL-9003 可用性
-P-READ-LAT 读性能 | P-READ-PLAN 读性能 | P-READ-SLOW 读性能
-P-LOCK 锁 | P-WRITE-CONFLICT 写入 | P-WRITE-SLOW 写入
-P-AVAIL-9002 附属，不可单独确认
-P-SCHED-* / P-RES-* / P-CHG-CFG 为 Should，开场不主动锁定
-完整标题见需求附录 D。禁止输出索引以外的根因名。
+Must（v1 允许确认根因）：P-AVAIL-9005 | P-AVAIL-CONN | P-READ-SLOW | P-LOCK 或 P-WRITE-*（P0 选定一条）
+其余附录 D ID 为 Should：可作候选阅读，不得写出已确认根因与第 6 节
+禁止输出附录 D 以外的根因名。
 
 # 开场路由
 - 开场只允许粗分类或候选 ID 列表，禁止写已确认根因
@@ -369,7 +365,7 @@ P-SCHED-* / P-RES-* / P-CHG-CFG 为 Should，开场不主动锁定
 
 #### 2.4.1 入库清单（与需求 §3.6.2 / 附录 D 对齐）
 
-冻结源是本地 `docs/docs-cn`（`pingcap/docs-cn` 的 `release-7.5`），**不整库导入**约 268 篇。以 docs-cn 文件名为准；官网英文若与中文源不一致，以 docs-cn 为准。不得再单独开列不存在的 `troubleshoot-tikv` / `troubleshoot-pd` 页面（对应内容在 `tidb-troubleshooting-map.md` 第 4、5 节）。
+冻结源是本地 `docs/docs-cn`（`pingcap/docs-cn` 的 `release-7.5`），**不整库导入**。v1 P3 **只入库需求附录 D Must 行**（G1/G2/G3 共 4 个问题点）及附录 B 精简闭集对应的错误码条目。下表其余行为 Should，不挡 P3。不得再单独开列不存在的 `troubleshoot-tikv` / `troubleshoot-pd` 页面。
 
 | 分类 | 源文件 | 官网路径（v7.5 中文线） | 诊断用途 |
 |------|--------|-------------------------|----------|
@@ -408,11 +404,11 @@ flowchart LR
 |------|------|
 | 采集 | 从冻结的 `docs/docs-cn` 取 §2.4.1 所列文件，按需求附录 D 抽出问题点。L3 若启用，按客户内网规范导入，不得新增 `problem_id` |
 | 分块 | **一个附录 D ID 一篇小文档**，现象/原因与解决建议放在同一块（或紧邻两块并共享 `problem_id`）。单块 500–1500 字。禁止把整篇导图糊成一块 |
-| 入库 | 将切好的 Markdown **批量上传** 至 Dify；P2 只导入 G1/G2/G3 对应 3～5 个 Must 问题点；P3 补齐附录 D 全部 Must，Should 尽量补齐 |
+| 入库 | P2 导入 G1/G2/G3 对应 **4 个** Must 问题点；P3 验收这 4 点可检索。Should 不挡 P3 |
 | 索引 | Qwen3-Embedding-4B + Qwen3-Reranker-4B；Top-K=5，Rerank 后取 Top-3 |
 | 元数据 | 必填：`problem_id`、`doc_title`、`section`、`source_url` 或 docs-cn 路径、`source_version`、`target_tidb_version`、`kb_snapshot_id`、`chunk_id`、`content_hash`、`has_solution`（是否具备合格解决建议）、`v1_scope`（Must/Should/Could）。建议增加 `component`、`symptom_tags`。`chunk_id` 在同一快照内稳定；正文 UTF-8、LF、无 BOM、去行尾空白并保留一个末尾换行后算 SHA-256 |
 | 更新 | Owner 见需求 §3.6.5；附录 D 增删或官网章节变更后重新切块导入 |
-| 质量 | 需求附录 B 错误码精确 Top-3 + 附录 D Must 问题点及其解决建议可检索。同类专题不能代替同码命中。`kb_snapshot_id` 取按 `chunk_id` 排序后的「元数据 + content_hash」集合之 SHA-256 |
+| 质量 | 需求附录 B **精简闭集** Top-3 + 附录 D **Must** 问题点及其解决建议可检索。`kb_snapshot_id` 取按 `chunk_id` 排序后的「元数据 + content_hash」集合之 SHA-256 |
 
 **问题点分块示例**：
 
@@ -490,7 +486,7 @@ cache_ttl_seconds: 300
 active_incident_seconds: 600      # end_time 为空或合法 end_time > now−该值则 bust
 prometheus_label_key: cluster     # P0 确认实际键名，如 cluster / tidb_cluster
 template_set_version: "prom-v1"   # §5.3 模板定义制品版本；纳入 config_digest
-evidence_thresholds:              # P0 与金标准一起冻结；实际按全部 Must 模板配置
+evidence_thresholds:              # P0 只冻 G1–G3 夹具用到的模板/签名
   tidb_p99:
     min_samples_per_window: 3
     allowed_directions: [increase]
@@ -515,7 +511,7 @@ clusters:
       logstores:
         runtime: tidb-runtime
         slow: tidb-slow
-        slow_parsed: tidb-slow-parsed
+        # slow_parsed 留 v2，v1 不读
       default_tag:
         cluster: prod-01
     prometheus:
@@ -604,7 +600,7 @@ API **只接受** 配置中存在的 `cluster_id`（否则 400 `unknown_cluster`
 
 **POST /api/v1/slow-query/analyze**
 
-与 logs 相同的绝对时间窗，不再使用无法对齐用户窗口的 `time_range=1h` 作为主参数。已配置且健康的 `slow_parsed` logstore 时 `parse_mode=parsed`，否则 `raw`。慢日志记录切分可使用格式解析与受控正则；解析失败时保留 digest 与统计字段，`query` 置 `[UNPARSEABLE_SQL]`。
+与 logs 相同的绝对时间窗，不再使用无法对齐用户窗口的 `time_range=1h` 作为主参数。v1 **固定** `parse_mode=raw`，不切换 parsed。慢日志记录切分可使用格式解析与受控正则；解析失败时保留 digest 与统计字段，`query` 置 `[UNPARSEABLE_SQL]`。
 
 ```json
 // Request
@@ -624,7 +620,7 @@ API **只接受** 配置中存在的 `cluster_id`（否则 400 `unknown_cluster`
 {
   "cluster_id": "prod-01",
   "source": "sls",
-  "parse_mode": "raw|parsed",
+  "parse_mode": "raw",
   "effective_start_time": "2026-08-20T14:15:00+08:00",
   "effective_end_time": "2026-08-20T14:45:00+08:00",
   "total_slow_queries": 156,
@@ -792,7 +788,7 @@ HTTP 非 2xx 统一返回错误信封，不得复用 `source_status`：
 
 - 金标准验收使用 Dify 自身的调用记录和测评导出，不新增 Diagnostic API 轨迹查询接口或审计存储。
 - Dify 测评导出包记录工具名、确认后的结构化参数、每个子查询状态、`source_status` 或 `failure_scope`、`cache_hit` / `cache_bypass_reason`、实际时间窗、数据水位、`config_digest`、响应 `response_hash`、适配器规则版本、Prompt hash、主模型标识与参数、`kb_snapshot_id`、检索 chunk_id/content_hash/score/source_url、公开夹具/盲测集 hash；以 `conversation_id + round_id` 合并成可复现记录。
-- **G7 注入**（仅非生产）：对指定 `cluster_id` 设置 `faults.sls_timeout: true` 或请求头 `X-Test-Fault: sls_timeout` → SLS 返回 `source_status=error`，Prom 仍 `ok`。对偶：`X-Test-Fault: prom_timeout`。生产环境出现该头 → 403 `test_fault_forbidden`。
+- **G7 注入**（仅非生产，Should 不挡 P3）：`X-Test-Fault: sls_timeout` 或 `prom_timeout` 使对应源返回 `error`。生产出现该头 → 403 `test_fault_forbidden`。一刀即可，不要求对偶两刀都测。
 
 ---
 
@@ -827,7 +823,7 @@ flowchart LR
     D --> E["返回 Agent"]
 ```
 
-**阶段二（生产）— SLS 加工结构化**
+**阶段二（v2，非 v1 交付）— SLS 加工结构化**
 
 ```mermaid
 flowchart LR
@@ -838,12 +834,12 @@ flowchart LR
 
 建议解析字段：`Time`, `Query_time`, `Digest`, `Query`, `DB`, `Index_names`, `Cop_time`, `Process_time`, `Mem_max`
 
-阶段二 **不是**「对 TiDB 零影响」：需要客户批准 SLS 加工任务与变更窗口（需求 P4）。未批准则 v1 停留在阶段一。
+阶段二需要客户批准 SLS 加工任务，**不在 v1 一个月窗口内交付**。v1 停留在阶段一 raw 解析。
 
 ### 4.3 SLS 权限
 
 - 查询：RAM 子账号仅授予目标 Project 的 `log:GetLogs`、SQL 查询权限
-- P4 加工：另授数据加工 / Scheduled SQL 所需权限，与只读查询账号分离（推荐）
+- v2 若做加工：另授数据加工权限，与只读查询账号分离；v1 不申请
 - AK/SK 存 Vault，由 Diagnostic API 持有，**不进入 Dify**
 
 ---
@@ -950,7 +946,7 @@ sequenceDiagram
         API->>S: 查 TiKV 日志
         S-->>API: 日志片段
     end
-    A->>KB: 按收敛结果定向检索 P-READ-SLOW / P-READ-PLAN
+    A->>KB: 按收敛结果定向检索 P-READ-SLOW
     KB-->>A: 带 problem_id 的解决建议
     A->>A: 观测对照该问题点；第 6 节只改写官方步骤
     A->>U: 九段报告
@@ -977,7 +973,7 @@ sequenceDiagram
 | 操作 | v1 只读诊断，不执行任何写操作 |
 | 可核查 | 见下方检查项；口头声明不算验收通过 |
 
-**P5 隔离检查项（须留证据）**：
+**P3 隔离检查项（须留证据）**：
 
 - [ ] Diagnostic API 配置与 Secret 中无 TiDB/TiKV/PD/TiFlash 地址、端口、DSN
 - [ ] 部署网络策略：出站仅允许 SLS、Prometheus、Vault（及本服务健康检查）
@@ -986,12 +982,11 @@ sequenceDiagram
 - [ ] OpenAPI / 代码路径无 Dashboard、Alertmanager、`CLUSTER_SLOW_QUERY` 客户端
 - [ ] 参数抽测：配置内 `cluster_id` 可查询，未知 `cluster_id` 返回 400 `unknown_cluster`
 
-**性能验收基线**：
+**性能抽样（对齐需求 §4.2，不设 5 并发正式压测）**：
 
-- 单集群并发 5 个完整 Workflow，持续 ≥15 分钟，每类接口成功样本 ≥100；冷缓存和热缓存分别出报告
-- 最大负载覆盖 2h 查询窗；health 与 metrics 还读取紧前 2h 对比窗，Prom `step=1m`；记录 SLS/Prom 总基数、运行日志命中数与慢日志 raw 扫描行数
-- 成功样本定义为 HTTP 2xx 且 `source_status` 为 `ok` 或 `empty`；`partial`、`error` 和系统产生的 HTTP 非 2xx 均计入错误率，预先标记的非法请求安全用例单列。P95 仅对成功样本统计，超时/错误率须 <1%；health/metrics/logs P95 <5s，slow raw <20s，parsed <3s
-- 端到端 P95 <40s 必须按真实 Workflow 顺序直接测量，不能由单接口 P95 相加推导；报告附压测脚本版本、配置 digest、缓存状态与原始汇总结果
+- 单集群、冷缓存，每类接口成功样本 ≥20
+- 成功样本 = HTTP 2xx 且 `source_status` 为 `ok` 或 `empty`；这 20 次中超时/错误不超过 1 次
+- health/metrics/logs P95 <5s，slow raw P95 <20s；端到端 P95 <40s 按真实调用顺序直接测量
 
 ---
 
@@ -1038,7 +1033,7 @@ flowchart LR
 
 1. **输入参数**：在 Agent 开始表单或 Chatflow 包装层配置 `cluster_id`、`time_mode`、`start_time`、`end_time`；不配置 `db_name` 或 `symptom_type`
 2. **Integrations → Model**：配置内网千问（§2.5）
-3. **Knowledge → 创建知识库**：按 §2.4.2 一块一文导入；P2 先导入 G1/G2/G3 对应问题点，P3 按附录 D Must 补齐。配置 Embedding + Rerank；元数据含 `problem_id`、`has_solution`；生成 `kb_snapshot_id`，保留真实 `source_version`、`chunk_id` 与 `content_hash`。不整库导入 docs-cn
+3. **Knowledge → 创建知识库**：按 §2.4.2 一块一文导入 G1/G2/G3 共 4 个 Must 问题点。配置 Embedding + Rerank；元数据含 `problem_id`、`has_solution`。不整库导入 docs-cn
 4. **Integrations → Tools → 自定义 API**：导入 4 个 Must 工具的 OpenAPI（不要导入 alerts）
 5. **配置生成**：发布流水线从 Diagnostic API 唯一配置生成全部已配置集群的 Dify 下拉选项并校验 `config_digest`；禁止人工双写
 6. **Credential**：Base URL + 共享 Key；通过 `X-API-Key` 发送。Header 映射 `X-Conversation-Id` = 当前会话 ID；能则映射 `X-Diag-Round-Id`（每条用户新消息新值，不写进 Prompt）
@@ -1051,15 +1046,13 @@ flowchart LR
 
 ## 11. 交付阶段技术交付物
 
-工期自需求 **P0 关闭** 后起算。
+工期自需求 **P0 关闭** 后起算，**P1–P3 共 3 周**，与需求 §1.7 一个月窗口对齐。不设 P4/P5。
 
 | 阶段 | 技术交付物 |
 |------|-----------|
-| P1 | Go 服务骨架；共享 Key 基本认证 + **必填 Conversation-Id**；限流与 **12 次/诊断回合**；**5 分钟缓存 + 活跃窗自动 bust + 失败不缓存**；`recent_15m` 服务端解析与实际窗口回传；时间窗顺序/未来/≤2h 校验；错误信封 `failure_scope`；`metrics/query`、`cluster/health`、`logs/fetch`；OpenAPI 3.0；Must 模板闭集与 `partial` 子状态 |
-| P2 | `slow-query/analyze`（raw + 慢查字段解析）；Dify 参数表单 + Agent + **4 工具**；§2.3 Prompt（含索引与开场路由）；FC 验证；单一配置生成集群选项；G1/G2/G3 对应问题点最小 RAG；使用已冻结公开夹具/盲测 hash；Dify 调用记录与测评导出；G1/G2/**G3**/G5/G13 行为可跑通（G3 根因严格打分延至 P3）；G2 夹具端到端取数 P95 实测记录 |
-| P3 | 附录 D Must 问题点一块一文；真实来源版本、`problem_id`、`kb_snapshot_id` 与 chunk content hash；Embedding/Rerank；全部公开夹具及 G1–G8/G6a/G15 盲测均通过；G13 复测 |
-| P4 | **仅当客户批准**：SLS 加工规则、`tidb-slow-parsed`、API 切 parsed。未批准则跳过 |
-| P5 | §7 隔离检查证据；基本认证抽测；运维/用户手册；上线 Checklist |
+| P1 | Go 服务骨架；共享 Key + Conversation-Id；限流与 12 次/回合；5 分钟缓存 + 活跃窗 bust；`recent_15m` 服务端解析；时间窗校验；`metrics/query`、`cluster/health`、`logs/fetch`；OpenAPI；Must 模板闭集 |
+| P2 | `slow-query/analyze`（**仅 raw**）；Dify 参数表单 + Agent + 4 工具；§2.3 Prompt；G1/G2/G3 共 4 个问题点 RAG；G1/G2/G3/G5/G13 行为可跑通（根因打分延至 P3） |
+| P3 | Must 问题点检索验收；附录 B 精简闭集 Top-3；G1/G2/G3 公开夹具与各 1 个盲测；G5/G13/G15/G6a/G8 行为；§7 隔离检查；手册上线 |
 
 ---
 
@@ -1107,6 +1100,7 @@ flowchart LR
 | v1.15 | 2026-08-23 | 内网千问部署：移除脱敏、模型网关敏感扫描、G14；慢查返回完整 SQL；§8 收敛为基本认证 |
 | v1.17 | 2026-08-23 | 对齐需求 v1.17：Prompt/RAG 分工、开场路由、按 problem_id 分块与两段检索；入库清单改为 docs-cn；去掉不存在的 troubleshoot-tikv/pd 页；P3 含 G15 |
 | v1.18 | 2026-08-24 | 移除 §2.6 Plan B（Workflow 固定采集）及 P2 固定采集交付；与需求 v1.18 同步 |
+| v1.19 | 2026-08-24 | 对齐需求 v1.19：P1–P3 三周交付；慢查仅 raw；取消原 P4/P5；Must RAG/金标准收窄为 G1/G2/G3 |
 
 ---
 
