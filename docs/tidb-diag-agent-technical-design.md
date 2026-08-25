@@ -1,11 +1,11 @@
 # TiDB 智能故障诊断 Agent — 技术架构与设计文档
 
-> 版本：v1.19<br>
-> 日期：2026-08-24<br>
+> 版本：v1.20<br>
+> 日期：2026-08-25<br>
 > 方案选型：Dify Agent + Diagnostic API + 阿里 SLS + Prometheus<br>
 > TiDB 目标版本：**v7.5.6**<br>
 > 关联文档：[需求文档](./tidb-diag-agent-requirements.md)<br>
-> 变更说明：v1.19 对齐需求一个月交付窗口：取消原 P4/P5，慢查仅 raw，金标准与 Must 问题点收窄
+> 变更说明：v1.20 对齐需求：附录 D 只保留 Must 问题点
 
 ---
 
@@ -252,7 +252,7 @@ v1 **仅**导入以下 4 个工具。不导入 Alertmanager，不调用 Dashboar
 
 | 放 Prompt | 放 RAG | 不要放 |
 |-----------|--------|--------|
-| 附录 D 索引：`problem_id` + 一行标题 + 粗分类（约 20 行） | 每个问题点的现象/原因原文 | 整篇 `tidb-troubleshooting-map.md` |
+| 附录 D 索引：`problem_id` + 一行标题 + 粗分类（本表 6 行） | 每个问题点的现象/原因原文 | 整篇 `tidb-troubleshooting-map.md` |
 | 开场三层路由（§2.3.2） | 同一问题点的官方解决建议 | 完整修复步骤、Grafana 面板名、参数取值 |
 | 无 RAG 引用不得确认根因；第 6/8 节边界 | 错误码条目（标明能否单独确认） | 附录 D 全文当 few-shot |
 | 粗分类 → 工具矩阵；置信度；信息不足 / 超出范围 / 官方依据不足 | `problem_id`、章节、`chunk_id` 等元数据 | L3 案例当作新的可诊断类型 |
@@ -307,9 +307,8 @@ health + 该类（或 Must 相关）指标
 - 引用知识库必须写 problem_id、标题、章节、源 URL 或 docs-cn 路径、source_version、kb_snapshot_id、chunk_id
 
 # 官方问题点索引（闭集，只作路由，不作正文）
-Must（v1 允许确认根因）：P-AVAIL-9005 | P-AVAIL-CONN | P-READ-SLOW | P-LOCK 或 P-WRITE-*（P0 选定一条）
-其余附录 D ID 为 Should：可作候选阅读，不得写出已确认根因与第 6 节
-禁止输出附录 D 以外的根因名。
+闭集（v1 允许确认根因）：P-AVAIL-9005 | P-AVAIL-CONN | P-READ-SLOW | P-LOCK 或 P-WRITE-*（P0 选定一条）
+禁止输出附录 D 以外的根因名。未选中的 G3 ID 不得写出已确认根因与第 6 节。
 
 # 开场路由
 - 开场只允许粗分类或候选 ID 列表，禁止写已确认根因
@@ -365,29 +364,24 @@ Must（v1 允许确认根因）：P-AVAIL-9005 | P-AVAIL-CONN | P-READ-SLOW | P-
 
 #### 2.4.1 入库清单（与需求 §3.6.2 / 附录 D 对齐）
 
-冻结源是本地 `docs/docs-cn`（`pingcap/docs-cn` 的 `release-7.5`），**不整库导入**。v1 P3 **只入库需求附录 D Must 行**（G1/G2/G3 共 4 个问题点）及附录 B 精简闭集对应的错误码条目。下表其余行为 Should，不挡 P3。不得再单独开列不存在的 `troubleshoot-tikv` / `troubleshoot-pd` 页面。
+冻结源是本地 `docs/docs-cn`（`pingcap/docs-cn` 的 `release-7.5`），**不整库导入**。v1 P3 **只入库需求附录 D**（G1/G2/G3 共 4 个问题点）及附录 B 精简闭集对应的错误码条目。不得再单独开列不存在的 `troubleshoot-tikv` / `troubleshoot-pd` 页面。
 
 | 分类 | 源文件 | 官网路径（v7.5 中文线） | 诊断用途 |
 |------|--------|-------------------------|----------|
 | 问题导图 | `tidb-troubleshooting-map.md` | https://docs.pingcap.com/zh/tidb/v7.5/tidb-troubleshooting-map | 按附录 D 切成问题点块，不作整页一块 |
-| 集群故障 | `troubleshoot-tidb-cluster.md` | https://docs.pingcap.com/zh/tidb/v7.5/troubleshoot-tidb-cluster | P-AVAIL-CONN 等 |
+| 集群故障 | `troubleshoot-tidb-cluster.md` | https://docs.pingcap.com/zh/tidb/v7.5/troubleshoot-tidb-cluster | P-AVAIL-CONN |
 | 错误码 | `error-codes.md` | https://docs.pingcap.com/zh/tidb/v7.5/error-codes | 附录 B 检索；解决建议不足时须联到专题 |
-| 延迟 | `troubleshoot-cpu-issues.md` | https://docs.pingcap.com/zh/tidb/v7.5/troubleshoot-cpu-issues | P-READ-LAT / P-READ-PLAN / P-RES-CPU |
-| 慢查询 | `identify-slow-queries.md`、`analyze-slow-queries.md`、`sql-tuning-overview.md` | identify-slow-queries / analyze-slow-queries / sql-tuning-overview | P-READ-SLOW |
-| 锁 | `troubleshoot-lock-conflicts.md` | https://docs.pingcap.com/zh/tidb/v7.5/troubleshoot-lock-conflicts | P-LOCK |
-| 写冲突 | `troubleshoot-write-conflicts.md` | https://docs.pingcap.com/zh/tidb/v7.5/troubleshoot-write-conflicts | P-WRITE-CONFLICT |
-| OOM / 热点 / I/O | `troubleshoot-tidb-oom.md`、`troubleshoot-hot-spot-issues.md`、`troubleshoot-high-disk-io.md` | 对应文件名 | Should 问题点 |
-| 监控 | `grafana-tidb-dashboard.md`、`grafana-tikv-dashboard.md`、`grafana-pd-dashboard.md` | 对应 Grafana 文档 | 指标对照，一般不单独构成问题点 |
-| 配置与变更 | `tidb-configuration-file.md`、`tikv-configuration-file.md`、`pd-configuration-file.md`、`maintain-tidb-using-tiup.md` | 对应文件名 | P-CHG-CFG |
-| 版本说明 | `releases/release-7.5.6.md` | GitHub `v7.5.6` tag / 文档站 Release | 已知问题 |
+| 慢查询 | `identify-slow-queries.md`、`analyze-slow-queries.md` | https://docs.pingcap.com/zh/tidb/v7.5/identify-slow-queries<br>https://docs.pingcap.com/zh/tidb/v7.5/analyze-slow-queries | P-READ-SLOW |
+| 锁 | `troubleshoot-lock-conflicts.md` | https://docs.pingcap.com/zh/tidb/v7.5/troubleshoot-lock-conflicts | P-LOCK（G3 选锁才入库） |
+| 写冲突 | `troubleshoot-write-conflicts.md` | https://docs.pingcap.com/zh/tidb/v7.5/troubleshoot-write-conflicts | P-WRITE-CONFLICT（G3 选写入冲突才入库） |
 
-不纳入诊断覆盖：TiFlash / CDC / DM / Lightning / Binlog 专题。Dashboard / Statement Summary 可作 L4 选读，**不是** v1 API 依赖。
+不纳入诊断覆盖：TiFlash / CDC / DM / Lightning / Binlog 专题；调度 / 资源 / 变更等已移出附录 D 的问题点。Dashboard / Statement Summary 可作 L4 选读，**不是** v1 API 依赖。G3 选写入慢时，从问题导图 §4.5 切 `P-WRITE-SLOW`，不另开专题页。
 
 **版本策略（v1 固定）**：
 
 - 客户生产版本：**v7.5.6**
-- RAG 仅维护 **一套** v7.5 docs-cn + v7.5.6 Release Note
-- 分块用 `target_tidb_version: v7.5.6` 标记适用目标；`source_version` 必须保留来源真实版本：TiDB 文档线为 `v7.5`、Release Note 为 `v7.5.6`、TiUP 文档为 `v1.14`，不得统一改写成目标版本
+- RAG 仅维护 **一套** v7.5 docs-cn（目标版本 v7.5.6）
+- 分块用 `target_tidb_version: v7.5.6` 标记适用目标；`source_version` 必须保留来源真实版本：TiDB 文档线为 `v7.5`，不得统一改写成目标版本
 
 #### 2.4.2 按问题点分块与导入
 
@@ -404,9 +398,9 @@ flowchart LR
 |------|------|
 | 采集 | 从冻结的 `docs/docs-cn` 取 §2.4.1 所列文件，按需求附录 D 抽出问题点。L3 若启用，按客户内网规范导入，不得新增 `problem_id` |
 | 分块 | **一个附录 D ID 一篇小文档**，现象/原因与解决建议放在同一块（或紧邻两块并共享 `problem_id`）。单块 500–1500 字。禁止把整篇导图糊成一块 |
-| 入库 | P2 导入 G1/G2/G3 对应 **4 个** Must 问题点；P3 验收这 4 点可检索。Should 不挡 P3 |
+| 入库 | P2 导入 G1/G2/G3 对应 **4 个** 问题点；P3 验收这 4 点可检索。未选中的 G3 行不入库 |
 | 索引 | Qwen3-Embedding-4B + Qwen3-Reranker-4B；Top-K=5，Rerank 后取 Top-3 |
-| 元数据 | 必填：`problem_id`、`doc_title`、`section`、`source_url` 或 docs-cn 路径、`source_version`、`target_tidb_version`、`kb_snapshot_id`、`chunk_id`、`content_hash`、`has_solution`（是否具备合格解决建议）、`v1_scope`（Must/Should/Could）。建议增加 `component`、`symptom_tags`。`chunk_id` 在同一快照内稳定；正文 UTF-8、LF、无 BOM、去行尾空白并保留一个末尾换行后算 SHA-256 |
+| 元数据 | 必填：`problem_id`、`doc_title`、`section`、`source_url` 或 docs-cn 路径、`source_version`、`target_tidb_version`、`kb_snapshot_id`、`chunk_id`、`content_hash`、`has_solution`（是否具备合格解决建议）、`v1_scope`（固定 `Must`）。建议增加 `component`、`symptom_tags`。`chunk_id` 在同一快照内稳定；正文 UTF-8、LF、无 BOM、去行尾空白并保留一个末尾换行后算 SHA-256 |
 | 更新 | Owner 见需求 §3.6.5；附录 D 增删或官网章节变更后重新切块导入 |
 | 质量 | 需求附录 B **精简闭集** Top-3 + 附录 D **Must** 问题点及其解决建议可检索。`kb_snapshot_id` 取按 `chunk_id` 排序后的「元数据 + content_hash」集合之 SHA-256 |
 
@@ -1101,6 +1095,7 @@ flowchart LR
 | v1.17 | 2026-08-23 | 对齐需求 v1.17：Prompt/RAG 分工、开场路由、按 problem_id 分块与两段检索；入库清单改为 docs-cn；去掉不存在的 troubleshoot-tikv/pd 页；P3 含 G15 |
 | v1.18 | 2026-08-24 | 移除 §2.6 Plan B（Workflow 固定采集）及 P2 固定采集交付；与需求 v1.18 同步 |
 | v1.19 | 2026-08-24 | 对齐需求 v1.19：P1–P3 三周交付；慢查仅 raw；取消原 P4/P5；Must RAG/金标准收窄为 G1/G2/G3 |
+| v1.20 | 2026-08-25 | 对齐需求 v1.20：附录 D 只保留 Must 问题点；入库清单去掉 Should 专题 |
 
 ---
 

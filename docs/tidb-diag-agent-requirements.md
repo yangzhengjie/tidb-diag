@@ -1,10 +1,10 @@
 # TiDB 智能故障诊断 Agent — 需求文档
 
-> 版本：v1.19<br>
-> 日期：2026-08-24<br>
+> 版本：v1.21<br>
+> 日期：2026-08-25<br>
 > TiDB 目标版本：**v7.5.6**（当前方案仅支持此单一版本）<br>
 > 关联文档：[技术架构与设计文档](./tidb-diag-agent-technical-design.md)<br>
-> 变更说明：v1.19 按 **1 个月交付** 收敛范围（取消原 P4/P5，收窄金标准、附录 D Must 与压测）
+> 变更说明：v1.21 删除「后续演进（v2+）」与「待客户确认项」
 
 ---
 
@@ -80,7 +80,7 @@ flowchart TB
 - **Workflow 固定采集（原 Plan B）**：v1 只走 Dify Agent + Function Calling，不交付、不切换固定采集入口
 - **SLS 慢查加工 / parsed logstore（原 P4）**：v1 只解析 raw
 - **独立一周安全评审（原 P5）**：隔离核查并入 P3，不单列阶段
-- **附录 D Should 问题点的根因金标准**：调度 / 资源 / 变更等可检索，但不挡 P3
+- **调度 / 资源 / 变更等根因金标准**：附录 D 已不收录此类问题点，不挡 P3
 - **附录 B 历史 20 码全量检索验收**：v1 只验收精简闭集
 - **5 并发正式压测基线**：改为单集群抽样（§4.2）
 
@@ -89,7 +89,7 @@ flowchart TB
 | 级别 | 范围 | 主路径是否依赖 |
 |------|------|----------------|
 | **Must** | 文字线索解析；SLS 运行日志；SLS 慢查 **raw**；Prometheus 指标与 health；附录 D **Must** 问题点 RAG（G1/G2/G3 对应闭集）；九段报告；G1/G2/G3 根因验收；G5/G13/G15/G6a/G8 行为验收；信息不足 / 官方依据不足退出 | 是 |
-| **Should** | 图片/截图辅助定方向；多轮追问；L4 指标释义；G4/G6/G7 公开夹具；附录 D Should 问题点可检索 | 否。无图必须能走通 Must |
+| **Should** | 图片/截图辅助定方向；多轮追问；L4 指标释义；G4/G6/G7 公开夹具 | 否。无图必须能走通 Must |
 | **Could** | L3 内部手册/历史案例；G9–G12 历史回放 | 否 |
 | **Won't（v1）** | 告警联动、Dashboard 代理、飞书/钉钉推送、多版本、自动修复、RBAC/集群授权、审计能力、任意 PromQL、数据脱敏与模型网关敏感扫描、Workflow 固定采集（原 Plan B）、SLS 慢查加工（原 P4）、独立 P5 周、20 码全量检索、5 并发正式压测 | — |
 
@@ -119,7 +119,7 @@ flowchart TB
 | 窗口 | 含 P0 约 **1 个自然月**。实施工期从 P0 关闭起算为 **3 周**（P1–P3） |
 | 上线定义 | 隔离可核查、4 个工具可用、G1/G2/G3 根因命中且官方依据闭环、G5/G13/G15/G6a/G8 行为通过 |
 | 客户材料 | P0 逾期则上线日 **顺延**，不靠压缩 P1–P3 消化 |
-| 本版明确不做 | 原 P4、原 P5 整周、附录 D Should 的根因打分、G1–G8 全量盲测、20 码检索验收、5 并发正式压测 |
+| 本版明确不做 | 原 P4、原 P5 整周、调度/资源/变更等根因打分、G1–G8 全量盲测、20 码检索验收、5 并发正式压测 |
 
 ---
 
@@ -223,17 +223,14 @@ flowchart TB
 
 | 故障分类 | v1 | 典型现象 | 必调工具 | 必查 Prom | RAG 关键词 |
 |----------|----|----------|----------|-----------|------------|
-| 可用性 | Must 验收 | 连接失败、超时、9005 | health；metrics；logs(tidb，9005/Region 假设时加 pd) | tidb_connections, tidb_qps；Region 假设加 pd_region_health | 附录 D：P-AVAIL-* |
-| 读性能 | Must 验收 | 查询慢、P99 升高 | health；metrics；slow_query | tidb_p99, tikv_cop_duration | 附录 D：P-READ-* |
-| 锁与事务 / 写性能 | Must 验收（二者取一做深，另一作 Should） | 锁等待、deadlock、写入/commit 慢 | health；metrics；slow_query；logs(tidb/tikv) | tikv_latch_wait 或 tikv_write_duration | 附录 D：P-LOCK-* / P-WRITE-* |
+| 可用性 | Must 验收 | 连接失败、超时、9005 | health；metrics；logs(tidb，9005/Region 假设时加 pd) | tidb_connections, tidb_qps；Region 假设加 pd_region_health | 附录 D：`P-AVAIL-9005` / `P-AVAIL-CONN` |
+| 读性能 | Must 验收 | 查询慢、P99 升高 | health；metrics；slow_query | tidb_p99, tikv_cop_duration | 附录 D：`P-READ-SLOW` |
+| 锁与事务 / 写性能 | Must 验收（二者取一做深） | 锁等待、deadlock、写入/commit 慢 | health；metrics；slow_query；logs(tidb/tikv) | tikv_latch_wait 或 tikv_write_duration | 附录 D：`P-LOCK` / `P-WRITE-CONFLICT` / `P-WRITE-SLOW`（G3 三选一） |
 | 信息不足 | Must 验收 | 非标准入口缺少 `cluster_id`；`custom` 缺起止时间；或参数冲突未确认 | 不猜参数；不调 health/logs/slow_query/metrics | — | — |
 | 官方依据不足 | Must 验收 | 有数据但附录 D 无对应问题点或无解决建议 | 已调工具；不得自创根因/修复 | 已查指标 | 无则转人工 |
 | 根因不明确 | Should | 观测不足以映射到唯一 Must 问题点 | 已调工具 + 后续清单 | 已查指标 | 同主题下一步或转人工 |
-| 调度 | Should | Region 异常、Leader 缺失 | logs(pd), health | pd_region_health | 附录 D：P-SCHED-* |
-| 资源 | Should | CPU/磁盘/内存高 | health, 资源指标 | node_cpu, node_disk_io, node_memory | 附录 D：P-RES-* |
-| 变更引发 | Should | 发布后故障 | logs(相关组件), health | 变更前后对比 | 附录 D：P-CHG-* |
 
-知识库 **Must** 只覆盖附录 D 中标 Must 的问题点（G1/G2/G3 对应闭集）及其解决建议；Should 问题点能检索更好，**不挡 P3**。官网有专题 ≠ v1 必须能诊。
+知识库 **Must** 只覆盖附录 D 问题点（G1/G2/G3 对应闭集）及其解决建议。官网有专题 ≠ v1 必须能诊。
 
 #### 3.3.2 超出范围时的行为
 
@@ -247,7 +244,7 @@ flowchart TB
 
 Agent **可以取数、归纳现象、引用证据**；**只有**同时满足下列条件，才允许写出已确认根因（第 5 节）和可执行修复（第 6 节）：
 
-1. **问题点命中**：根因短句能映射到附录 D 中 **一条 Must** 官方问题点（允许观测把「连接超时」收敛到 `P-AVAIL-9005`，不允许自造目录外根因）。命中 Should 行时按官方依据不足处理，P3 不验收 Should 根因。
+1. **问题点命中**：根因短句能映射到附录 D 中 **一条** 官方问题点（允许观测把「连接超时」收敛到 `P-AVAIL-9005`，不允许自造目录外根因）。未选中的 G3 行按官方依据不足处理，P3 不验收。
 2. **解决建议命中**：同一问题点在官网原文中存在处理 / 解决 / 缓解 / 可执行下一步；仅「需报 bug」「联系支持」或仅错误码含义说明，**不够**。
 3. **可引用**：报告第 4.4 节列出该问题点的标题、章节、源文件或 URL、`source_version`、`kb_snapshot_id`、`chunk_id`。
 4. **观测验证**：第 5 节仍须按 §3.4 用 SLS / Prometheus 验证「本次属于该问题点」；不能只靠文档下结论。
@@ -368,7 +365,7 @@ Prompt 与 RAG 分工（实现细节见技术设计 §2.3 / §2.4）：
 
 | 层级 | 优先级 | 内容 |
 |------|--------|------|
-| **L1** | Must | 仅附录 D **Must** 行对应的 `docs/docs-cn`（`release-7.5`）章节：问题导图相关节、集群连接、错误码、慢查询，以及 G3 选定的锁 **或** 写冲突。不整库导入。TiFlash / CDC / DM / Lightning / Binlog 不导入 |
+| **L1** | Must | 仅附录 D 对应的 `docs/docs-cn`（`release-7.5`）章节：问题导图相关节、集群连接、错误码、慢查询，以及 G3 选定的锁、写冲突或写入慢。不整库导入。TiFlash / CDC / DM / Lightning / Binlog 不导入 |
 | **L3** | Could | 客户手册、历史案例 |
 | **L4** | Should | 指标释义（知识库侧；API 预置模板本身是 Must，见 §3.7.1）。P3 不挡 |
 
@@ -386,13 +383,11 @@ L3 若启用，按客户内网资料管理规范导入；v1 不额外要求入�
 | 集群故障 | `troubleshoot-tidb-cluster.md` | 连接不上 / 拒绝连接 | Must |
 | 错误码 | `error-codes.md` | 附录 B 精简闭集 | Must |
 | 慢查询 | `identify-slow-queries.md`、`analyze-slow-queries.md` | 慢查定位与分析 | Must |
-| 锁 | `troubleshoot-lock-conflicts.md` | 1205/1213 | Must（G3 选锁）/ Should（否则） |
-| 写冲突 | `troubleshoot-write-conflicts.md` | 9007 / 8005 | Must（G3 选写入）/ Should（否则） |
-| 延迟 | `troubleshoot-cpu-issues.md`、`sql-tuning-overview.md` | 读写延迟、计划 | Should |
-| OOM / 热点 / 磁盘 | 对应 troubleshoot 页 | 资源类 | Should |
-| 监控 / 配置 / Release Note | grafana / 配置文件 / `releases/release-7.5.6.md` | 对照与已知问题 | Should，P3 不挡 |
+| 锁 | `troubleshoot-lock-conflicts.md` | 1205/1213 | Must（G3 选锁）；否则不入库 |
+| 写冲突 | `troubleshoot-write-conflicts.md` | 9007 / 8005 | Must（G3 选写入冲突）；否则不入库 |
+| 写入慢 | `tidb-troubleshooting-map.md` §4.5 | TiKV 写入慢 | Must（G3 选写入慢）；否则不入库 |
 
-Dashboard / Statement Summary 不是 v1 工具依赖。问题点级映射见附录 D。P3 **只验收 Must 行对应章节已入库**。
+Dashboard / Statement Summary 不是 v1 工具依赖。问题点级映射见附录 D。P3 **只验收本表 Must 行对应章节已入库**。G3 未选中的专题不入库。
 
 #### 3.6.3 检索策略
 
@@ -411,10 +406,10 @@ Dashboard / Statement Summary 不是 v1 工具依赖。问题点级映射见附�
 - [ ] 离线 Markdown 导入，无 URL / 定时同步依赖
 - [ ] 附录 B 精简闭集：给定错误码后 Rerank Top-3 至少一条含**同一错误码及其官方含义**
 - [ ] 附录 D **Must** 问题点可检索；给定问题点 ID 后 Top-3 至少一条含对应解决建议
-- [ ] Must 分块记录真实 `source_version`（文档线 `v7.5`，不得改写成 v7.5.6）、`kb_snapshot_id`、`chunk_id`、`problem_id`；**一块一文** 只要求 Must 行
+- [ ] Must 分块记录真实 `source_version`（文档线 `v7.5`，不得改写成 v7.5.6）、`kb_snapshot_id`、`chunk_id`、`problem_id`；**一块一文** 只要求附录 D 行
 - [ ] 已确认根因的报告第 4.4 节列出问题点 ID、源路径或 URL、`kb_snapshot_id`、`chunk_id`
 
-Should 问题点、五类专题全覆盖、Release Note / Grafana 入库 **均不挡 P3**。
+五类专题全覆盖、Release Note / Grafana 入库 **均不挡 P3**。
 
 #### 3.6.5 维护责任
 
@@ -627,7 +622,7 @@ v1 暂不实现 RBAC、集群级授权、多 Key 角色、Key 到期/轮换/吊�
 - [ ] 共享 Key 的部署注入方式与网络隔离要求
 - [ ] G3 深挖方向（锁 **或** 写入）；G9–G12 **或** 书面确认暂缺（不挡上线）
 - [ ] 知识库 Owner 姓名
-- [ ] 附录 D **Must** 行章节锚点已按 `docs/docs-cn` 核对（G1/G2/G3 对应 4 个问题点）；Should 行不挡开工
+- [ ] 附录 D 章节锚点已按 `docs/docs-cn` 核对（G1/G2/G3 对应 4 个问题点）；未选中的 G3 行不挡开工
 - [ ] 金标准验收 Owner（P3 打分前冻结公开夹具与 G1–G3 盲测；P0/P2 不要求盲测已冻结）
 - [ ] Dify 能否写入 `X-Conversation-Id`；不能则 P2 由应用层写入，API 缺省仍返回 400
 - [ ] Dify 能否写入 `X-Diag-Round-Id`；不能则书面接受「缺省 15 分钟合并计数」
@@ -685,35 +680,6 @@ v1 暂不实现 RBAC、集群级授权、多 Key 角色、Key 到期/轮换/吊�
 
 ---
 
-## 9. 后续演进（v2+）
-
-- Alertmanager 只读接入与告警预采集
-- TiDB Dashboard 只读代理
-- 飞书/钉钉推送
-- L3 案例自动沉淀
-- 规则引擎 + LLM 混合
-- 文档 ETL 批量导入
-- 多 TiDB 版本
-- RBAC、集群级授权、多 Key 管理与审计能力
-- 公网或多租户场景下的数据脱敏与模型网关敏感扫描
-- TiFlash / CDC 等组件诊断（另开范围）
-- 按官网新增问题点扩大附录 D（须同时具备解决建议与可验证观测）
-- SLS 慢查加工（原 P4）与 parsed 查询
-- 附录 D Should 问题点纳入金标准；错误码检索扩回约 20 码
-- 5 并发正式压测与独立安全评审周
-
----
-
-## 10. 待客户确认项
-
-- [ ] §6.1 全部 P0 关闭项
-- [ ] Diagnostic API 部署环境（VM / K8s）
-- [ ] 共享 Key 使用环境变量还是 K8s Secret 注入
-
-> **已确认**：TiDB **v7.5.6**；v1 不做多版本；不接入 Alertmanager；图片为 Should。**交付窗口**：含 P0 约 1 个月，P0 关闭后 P1–P3 共 3 周。不交付原 P4/P5 与 Workflow 固定采集。Dify 必选集群、无默认值，时间为 `recent_15m`/`custom`。G9–G12 无数据不挡上线。超 2h 拒绝查询。12 次限额只计 Diagnostic API。已确认根因与可执行修复必须命中官网问题点 + 解决建议；开场不锁定唯一附录 D ID。P3 金标准以 G1/G2/G3 根因 + 精简行为集为准。
-
----
-
 ## 附录 A. 术语
 
 | 术语 | 说明 |
@@ -751,11 +717,11 @@ P3 至少验收 **9005 + 2013**，以及 G3 选定方向对应的 2 个码（锁
 
 ## 附录 D. v1 官方问题点目录（初稿）
 
-闭集。P0 只冻结 **Must** 行章节锚点。Should 行可不入库。增删 Must 须书面记录。
+闭集。本表只列 v1 Must 问题点。P0 冻结章节锚点；增删须书面记录。
 
 **合格标准**：同时具备「问题点」（现象或原因）和「解决建议」（处理 / 解决 / 缓解 / 可执行下一步，且不只是报 bug）。
 
-**不纳入本目录的官网内容**：TiFlash / CDC / DM / Lightning / Binlog；数据索引一致性（需 `ADMIN CHECK`）；DDL owner 迁移（需 status 端口 / `tidb-ctl`）；TiKV panic 后 `tikv-ctl` 恢复；仅「需报 bug」的条目。
+**不纳入本目录的官网内容**：TiFlash / CDC / DM / Lightning / Binlog；数据索引一致性（需 `ADMIN CHECK`）；DDL owner 迁移（需 status 端口 / `tidb-ctl`）；TiKV panic 后 `tikv-ctl` 恢复；仅「需报 bug」的条目；调度 / 资源 / 变更等原 Should 问题点。
 
 | ID | 官方问题点 | 源文件与章节 | 解决建议要点 | v1 |
 |----|------------|--------------|--------------|----|
@@ -765,22 +731,8 @@ P3 至少验收 **9005 + 2013**，以及 G3 选定方向对应的 2 个码（锁
 | P-LOCK | 锁冲突 / 死锁 / Lock wait timeout | 导图 §3.8；`troubleshoot-lock-conflicts.md`；1205/1213 | 按乐观/悲观分支处理；Lock View 只进第 8 节 | **Must（G3 选锁）** |
 | P-WRITE-CONFLICT | 写写冲突 | `troubleshoot-write-conflicts.md`；9007/8005 | 识别冲突 key；应用侧重试或改事务 | **Must（G3 选写入冲突）** |
 | P-WRITE-SLOW | TiKV 写入慢 | 导图 §4.5 | 按 scheduler / append log / raftstore / apply 分支 | **Must（G3 选写入慢）** |
-| P-AVAIL-PD | PD 异常导致服务不可用 | 导图 §1.2、§5.2 | 查 PD 选举、磁盘、网络、OOM | Should |
-| P-AVAIL-9001 | PD server timeout | `error-codes.md` 9001；导图 §5.2.3 | 查 PD Leader、网络、磁盘与负载 | Should |
-| P-AVAIL-9003 | TiKV Server is Busy | 导图 §4.3；`error-codes.md` 9003 | write stall / scheduler / raftstore / Cop 排队 | Should |
-| P-READ-LAT | 延迟明显升高 | 导图 §2；`troubleshoot-cpu-issues.md` | 按计划、PD、TiKV、CPU、GC 分支 | Should |
-| P-READ-PLAN | 执行计划不对 | 导图 §3.3；`troubleshoot-cpu-issues.md` | 更新统计信息、绑定计划 | Should |
-| P-AVAIL-9002 | TiKV server timeout | `error-codes.md` 9002 | 总表步骤不足，须再命中导图 §4 才可确认 | 附属，不可单独确认 |
-| P-SCHED-LEADER | 某些 TiKV 大量掉 Leader | 导图 §4.4 | 查重启、OOM、busy、网络 | Should |
-| P-SCHED-PD | PD 调度问题 | 导图 §5.1 | merge / 补副本 / balance | Should |
-| P-RES-OOM | TiDB OOM | 导图 §3.2；`troubleshoot-tidb-oom.md` | 按部署/SQL/大事务等处理 | Should |
-| P-RES-IO | 磁盘 I/O 过高 | 导图 §3.7；`troubleshoot-high-disk-io.md` | 按监控与日志定位 | Should |
-| P-RES-HOT | 热点 | 导图 §3.6；`troubleshoot-hot-spot-issues.md` | SHARD_ROW_ID_BITS 等；Dashboard 进第 8 节 | Should |
-| P-RES-CPU | CPU Load 升高 | `troubleshoot-cpu-issues.md` CPU 节 | 热点、慢查或扩容 | Should |
-| P-CHG-CFG | 配置或变更引发 | TiUP / 配置文件 / Release Note | 仅当官网写明影响与处理 | Should |
-| P-AVAIL-MAXCONN | 连接数限制 | FAQ / `max_connections` | 调整连接数或扩容 TiDB | Could |
 
-P3 知识库与根因打分 **只卡 Must 行**：G1 两条 + G2 一条 + G3 选定的一条，共 **4 个问题点**。G3 在 P0 选定后冻结；未选中的写入行降为 Should，不挡 P3。Should 行可入库，不挡上线。
+P3 知识库与根因打分只卡本表：G1 两条 + G2 一条 + G3 选定的一条，共 **4 个问题点**。G3 在 P0 选定后冻结；未选中的 G3 行本版不入库、不验收。
 
 ## 附录 C. 文档维护
 
@@ -800,6 +752,8 @@ P3 知识库与根因打分 **只卡 Must 行**：G1 两条 + G2 一条 + G3 选
 | v1.17 | 2026-08-23 | 补充 §3.3.4 开场路由与 Prompt/RAG 分工；两段检索；与技术设计 v1.17 同步 |
 | v1.18 | 2026-08-24 | 移除 §3.10 Plan B（条件 Must）及固定采集交付、风险与术语 |
 | v1.19 | 2026-08-24 | 按 1 个月交付收敛：取消原 P4/P5；附录 D Must 收为 G1/G2/G3 共 4 点；错误码改为精简闭集；金标准盲测仅 G1–G3；压测改为抽样；P0 关闭项收窄 |
+| v1.20 | 2026-08-25 | 附录 D 只保留 Must 问题点，删除 Should/Could 行；正文不再引用已删除 ID |
+| v1.21 | 2026-08-25 | 删除第 9 节后续演进（v2+）与第 10 节待客户确认项 |
 
 ---
 
