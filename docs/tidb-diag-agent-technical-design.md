@@ -1,11 +1,11 @@
 # TiDB 智能故障诊断 Agent - 技术架构与设计文档
 
-> 版本：v1.21<br>
+> 版本：v1.22<br>
 > 日期：2026-08-25<br>
 > 方案：Dify Agent + Diagnostic API + 阿里 SLS + Prometheus<br>
 > TiDB 目标版本：**v7.5.6**<br>
 > 关联文档：[需求文档](./tidb-diag-agent-requirements.md)<br>
-> 变更说明：对齐需求 v1.22，收敛为 3 个工具、最小 RAG 和无状态单实例 API
+> 变更说明：对齐需求 v1.23，G1 收窄为 9005 / Region is Unavailable，已启用问题卡片减至 3 个
 
 ---
 
@@ -15,7 +15,7 @@
 flowchart TB
     User["运维 / DBA"] --> Dify["Dify Agent\n参数表单 · 对话 · 报告"]
     Dify --> Qwen["内网千问"]
-    Dify --> KB["Dify 知识库\n4 个官方问题卡片"]
+    Dify --> KB["Dify 知识库\n3 个官方问题卡片"]
     Dify -->|"HTTPS + X-API-Key"| API["Diagnostic API（Go，单实例）\n校验 · 限流 · 聚合 · 截断"]
     API --> SLS["阿里 SLS\n运行日志 · raw 慢日志"]
     API --> Prom["Prometheus\n固定指标 profile"]
@@ -31,7 +31,7 @@ flowchart TB
 |------|------|----------|
 | Dify Agent | 参数入口、线索解析、工具选择、知识检索和六段报告 | 不保存 SLS/Prom 凭证，不生成 PromQL/SLS SQL |
 | 内网千问 | Function Calling、证据归纳和报告生成 | 不直接访问数据源，不执行修复 |
-| Dify 知识库 | 保存 4 个官方问题卡片，按 `problem_id` 检索 | 不整库导入 docs-cn，不导入内部案例 |
+| Dify 知识库 | 保存 3 个官方问题卡片，按 `problem_id` 检索 | 不整库导入 docs-cn，不导入内部案例 |
 | Diagnostic API | 认证、参数校验、固定查询、聚合、限流和 64KB 响应上限 | 不调用模型，不直连生产，不维护会话状态或缓存 |
 | SLS Adapter | 查询运行日志和 raw 慢日志 | 不写 SLS，不创建 parsed logstore |
 | Prom Adapter | 执行固定 profile 对应 PromQL | 不接受任意 PromQL |
@@ -43,7 +43,7 @@ flowchart TB
 2. **三个工具**：合并 health 和单指标查询为 `query_metrics(profile)`，避免重复查询和工具选择分叉。
 3. **无状态 API**：v1 不实现缓存、诊断回合计数或跨实例共享状态，部署单实例。
 4. **结果导向验收**：Agent 不保证唯一调用顺序；参数边界由 API 强制，诊断质量按最终证据和结论验收。
-5. **问题卡片而非通用 RAG**：只导入 4 张官方卡片；开场宽检索可选，输出建议前按 ID 定向检索。
+5. **问题卡片而非通用 RAG**：只导入 3 张官方卡片；开场宽检索可选，输出建议前按 ID 定向检索。
 6. **诚实表达数据边界**：raw 慢日志输出样本内 Top N，并明确扫描数和截断状态。
 7. **简单版本标识**：API 返回 `config_version`，知识库使用 `kb_version`；不计算跨组件内容哈希。
 
@@ -132,7 +132,6 @@ OpenAPI 只暴露受控枚举和业务参数，不暴露 PromQL、SLS SQL、响�
 
 # v1 问题卡片
 - P-AVAIL-9005
-- P-AVAIL-CONN
 - P-READ-SLOW
 - <ENABLED_G3_ID>
 
@@ -159,7 +158,7 @@ OpenAPI 只暴露受控枚举和业务参数，不暴露 PromQL、SLS SQL、响�
 
 ### 2.5 官方问题卡片
 
-冻结源为 `docs/docs-cn` 的 `release-7.5` 分支。按需求附录 C 导入 G1 两张、G2 一张和 P0 选定的 G3 一张。
+冻结源为 `docs/docs-cn` 的 `release-7.5` 分支。按需求附录 C 导入 G1 一张、G2 一张和 P0 选定的 G3 一张。
 
 问题卡片示例：
 
@@ -501,7 +500,7 @@ P0 必须用客户真实样本确认：
 
 | 场景 | 首选 profile | 补充工具 |
 |------|--------------|----------|
-| 连接失败/9005 | `availability` | TiDB 日志；9005/Region 假设增加 PD 日志 |
+| 9005 / Region is Unavailable | `availability` | TiDB 日志；Region 假设增加 PD 日志 |
 | 查询变慢 | `read` | 慢日志样本；必要时 TiKV 日志 |
 | 锁问题 | `lock` | TiDB/TiKV 日志和慢日志样本 |
 | 写冲突/写入慢 | `write` | TiDB/TiKV 日志和慢日志样本 |
@@ -588,7 +587,7 @@ flowchart LR
 2. 实测所有 Prometheus profile 和 SLS 字段映射。
 3. 导入 3 个 OpenAPI 工具。
 4. 在 Dify 配置集群和时间参数，人工核对 API 集群配置。
-5. 导入 4 个官方问题卡片，记录 `kb_version`。
+5. 导入 3 个官方问题卡片，记录 `kb_version`。
 6. 配置 Prompt、模型和最大迭代数。
 7. 执行需求 §4.2 用例、性能抽样和隔离检查。
 8. 发布内网 URL 或嵌入运维门户。
@@ -637,7 +636,8 @@ flowchart LR
 | 版本 | 日期 | 变更 |
 |------|------|------|
 | v1.20 | 2026-08-25 | 对齐需求 v1.20，附录问题点只保留 Must |
-| v1.21 | 2026-08-25 | 对齐需求 v1.22：合并 health/metrics，移除缓存、回合状态和复杂哈希；RAG 收敛为 4 个问题卡片；明确慢日志样本语义和单实例部署 |
+| v1.21 | 2026-08-25 | 对齐需求 v1.22：合并 health/metrics，移除缓存、回合状态和复杂哈希；RAG 收敛为最小问题卡片集合；明确慢日志样本语义和单实例部署 |
+| v1.22 | 2026-08-25 | 对齐需求 v1.23：G1 收窄为 9005 / Region is Unavailable；已启用问题卡片减至 3 个 |
 
 历史版本详见 Git 记录。
 
