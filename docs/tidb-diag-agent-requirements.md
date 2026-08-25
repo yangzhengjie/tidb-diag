@@ -1,10 +1,10 @@
 # TiDB 智能故障诊断 Agent - 需求文档
 
-> 版本：v1.23<br>
+> 版本：v1.24<br>
 > 日期：2026-08-25<br>
 > TiDB 目标版本：**v7.5.6**（v1 仅支持此版本）<br>
 > 关联文档：[技术架构与设计文档](./tidb-diag-agent-technical-design.md)<br>
-> 变更说明：G1 收窄为 9005 / Region is Unavailable，已启用问题卡片减至 3 个
+> 变更说明：移除可用性诊断方向，已启用问题卡片减至 2 个
 
 ---
 
@@ -19,7 +19,7 @@
 3. 输出证据、匹配的问题模式、诊断判断、官方处理建议和未覆盖项。
 4. 证据不足或超出范围时明确降级，不编造根因或修复步骤。
 
-v1 的定位是 **3 个官方问题模式的受控诊断试点**，不是通用 TiDB 根因诊断平台，也不替代现有告警和人工排障。
+v1 的定位是 **2 个官方问题模式的受控诊断试点**，不是通用 TiDB 根因诊断平台，也不替代现有告警和人工排障。
 
 诊断结论分为三级：
 
@@ -48,7 +48,7 @@ v1 的定位是 **3 个官方问题模式的受控诊断试点**，不是通用 
 
 | 范围 | 内容 |
 |------|------|
-| **Must** | 文字线索；受控集群和时间参数；3 个只读诊断工具；G1/G2/G3 对应 3 个官方问题卡片；六段报告；信息不足、单源失败、官方依据不足和超范围行为 |
+| **Must** | 文字线索；受控集群和时间参数；3 个只读诊断工具；G2/G3 对应 2 个官方问题卡片；六段报告；信息不足、单源失败、官方依据不足和超范围行为 |
 | **不在 v1** | 图片/OCR、内部案例、指标知识专题、告警联动、Dashboard 代理、多版本、自动修复、任意 PromQL、SLS parsed logstore、缓存、回合计数、RBAC、审计存储、动态配置生成、复杂内容哈希、正式渗透测试和并发压测 |
 
 不在范围的功能不得进入 P1-P3 交付清单，也不得阻塞上线。
@@ -58,7 +58,7 @@ v1 的定位是 **3 个官方问题模式的受控诊断试点**，不是通用 
 用户先选择结构化参数，再提供文字线索。文字线索包括：
 
 - 客户端错误码或错误日志
-- 9005 / Region is Unavailable、查询变慢、锁等待或写入变慢等现象
+- 查询变慢、锁等待或写入变慢等现象
 - 故障开始时间和持续时间的补充说明
 - 用户已知的发布、扩容或配置变更
 
@@ -72,7 +72,7 @@ v1 的定位是 **3 个官方问题模式的受控诊断试点**，不是通用 
 |----|------|
 | 总窗口 | P0 约 3 个工作日，P1-P3 共 3 周；P0 逾期则上线日顺延 |
 | 人员假设 | 至少 1 名后端工程师、1 名 Dify/模型工程师并行，客户 DBA/平台人员可及时提供现网支持 |
-| 上线定义 | 3 个已启用问题卡片可检索；3 个工具可用；G1/G2/G3 及关键降级用例通过；生产隔离可核查 |
+| 上线定义 | 2 个已启用问题卡片可检索；3 个工具可用；G2/G3 及关键降级用例通过；生产隔离可核查 |
 | 交付性质 | 内网受控试点，不承诺通用根因覆盖率、生产级 HA 或业务 SLA 改善比例 |
 
 若人员假设或 P0 数据条件不满足，三周实施周期不成立。
@@ -103,7 +103,7 @@ v1 只提供以下 3 个工具，接口定义见[技术设计第 3 章](./tidb-d
 
 | 工具 | 能力 | 数据源 |
 |------|------|--------|
-| `query_metrics` | 按 `health`、`availability`、`read`、`lock`、`write` 固定 profile 查询当前窗和紧前等长窗 | Prometheus |
+| `query_metrics` | 按 `health`、`read`、`lock`、`write` 固定 profile 查询当前窗和紧前等长窗 | Prometheus |
 | `fetch_component_logs` | 按集群、组件、时间和关键词查询运行日志，返回聚合和代表样本 | SLS runtime logstore |
 | `analyze_slow_query_sample` | 在最多 2000 条 raw 记录样本内解析、聚合并返回 Top N | SLS slow logstore |
 
@@ -146,7 +146,6 @@ P0 在锁、写冲突、写入慢中选择一个 G3 方向；未选择方向不�
 
 | 分类 | 输入示例 | 指标 profile | 其他证据 | 官方问题卡片 |
 |------|----------|--------------|----------|----------------|
-| G1 可用性 | 9005、Region is Unavailable | `availability` | TiDB 日志；Region 假设增加 PD 日志 | `P-AVAIL-9005` |
 | G2 读性能 | 查询慢、P99 升高 | `read` | 慢日志样本；必要时 TiKV 日志 | `P-READ-SLOW` |
 | G3 锁 | 1205、1213、锁等待 | `lock` | TiDB/TiKV 日志和慢日志样本 | `P-LOCK` |
 | G3 写冲突 | 9007、8005 | `write` | TiDB 日志和慢日志样本 | `P-WRITE-CONFLICT` |
@@ -185,7 +184,7 @@ Prompt 只保存问题卡片索引和决策规则；官方现象、原因和解�
 
 | 项 | v1 要求 |
 |----|---------|
-| 范围 | 附录 C 中 G1 一条、G2 一条、P0 选定的 G3 一条，共 3 个问题卡片 |
+| 范围 | 附录 C 中 G2 一条、P0 选定的 G3 一条，共 2 个问题卡片 |
 | 分块 | 一个 `problem_id` 一篇 Markdown，问题描述和解决建议放在同一逻辑块 |
 | 必填元数据 | `problem_id`、`doc_title`、`section`、`source_path` 或 `source_url`、`source_version`、`has_solution` |
 | 检索 | 开场宽检索可选；输出建议前必须按 `problem_id` 定向检索 |
@@ -254,12 +253,12 @@ Prompt 只保存问题卡片索引和决策规则；官方现象、原因和解�
 - [ ] SLS runtime/slow logstore、只读凭证和网络已提供
 - [ ] 运行日志包含可用的 `cluster`、`component`、`host` 字段或等价映射
 - [ ] 慢日志样本覆盖完整多行记录；已确认 SLS 事件边界、排序、两小时最大量和截断语义
-- [ ] Prometheus URL、集群 label、G1-G3 所需指标名和单位已实测非空
+- [ ] Prometheus URL、集群 label、G2/G3 所需指标名和单位已实测非空
 - [ ] `cluster_id`、展示名和 TiDB v7.5.6 已确认
 - [ ] Dify/千问已验证文字输入、时间参数、工具调用、错误信封、知识卡片来源展示和最大迭代设置
 - [ ] G3 深挖方向已从锁、写冲突、写入慢中选择一个
-- [ ] 3 个已启用问题卡片的章节和解决建议已按 `docs/docs-cn` 核对
-- [ ] G1/G2/G3 公开夹具和各 1 个盲测变体已有验收 Owner
+- [ ] 2 个已启用问题卡片的章节和解决建议已按 `docs/docs-cn` 核对
+- [ ] G2/G3 公开夹具和各 1 个盲测变体已有验收 Owner
 - [ ] 共享 Key、无 RBAC、单实例、完整 SQL 不脱敏等风险已书面接受
 - [ ] 后端、Dify/模型和客户 DBA 的人员投入已确认
 
@@ -267,7 +266,6 @@ Prompt 只保存问题卡片索引和决策规则；官方现象、原因和解�
 
 | ID | 场景 | 通过条件 |
 |----|------|----------|
-| G1 | 9005 / Region is Unavailable | 指标和相关日志证据完整；匹配 `P-AVAIL-9005`；结论强度与证据一致 |
 | G2 | 查询变慢 | 返回样本内 Top N 和扫描/截断说明；匹配 `P-READ-SLOW`；不空泛编造优化步骤 |
 | G3 | P0 选定的锁或写入方向 | 使用对应 profile、日志/慢查证据和问题卡片；未选方向不验收 |
 | G5 | 缺 `cluster_id` 或自定义时间不完整 | 输出信息不足报告，工具调用为空 |
@@ -278,7 +276,7 @@ Prompt 只保存问题卡片索引和决策规则；官方现象、原因和解�
 | G13 | `recent_15m` | 首个工具由 API 解析时间，后续工具复用同一绝对窗口 |
 | G15 | 有观测但无官方问题卡片/解决建议 | 标为官方依据不足，不确认根因、不自行给修复 |
 
-G1/G2/G3 各包含 1 个公开夹具和 1 个盲测变体。“部分正确”不算通过。验收既检查结论，也检查证据是否足以支持该结论，但不要求唯一工具调用顺序。
+G2/G3 各包含 1 个公开夹具和 1 个盲测变体。“部分正确”不算通过。验收既检查结论，也检查证据是否足以支持该结论，但不要求唯一工具调用顺序。
 
 ### 4.3 里程碑
 
@@ -286,15 +284,15 @@ G1/G2/G3 各包含 1 个公开夹具和 1 个盲测变体。“部分正确”�
 |------|------|------------|
 | P0 条件确认 | 约 3 个工作日 | §4.1 全部关键项关闭 |
 | P1 Diagnostic API | 1 周 | 单实例服务、共享 Key、时间窗校验、`query_metrics`、`fetch_component_logs`、OpenAPI 和适配器测试 |
-| P2 慢日志与 Dify | 1 周 | `analyze_slow_query_sample`、3 个工具、六段报告、3 个已启用问题卡片、G1/G2/G3/G5/G13 可跑通 |
+| P2 慢日志与 Dify | 1 周 | `analyze_slow_query_sample`、3 个工具、六段报告、2 个已启用问题卡片、G2/G3/G5/G13 可跑通 |
 | P3 验收上线 | 1 周 | §4.2 用例、性能抽样、生产隔离检查、部署与使用说明 |
 
 ### 4.4 上线条件
 
 - 3 个工具在客户环境可用，参数和查询边界由 API 强制执行。
-- G1/G2/G3 公开夹具和盲测通过；G5/G6a/G7/G8/G13/G15 行为通过。
+- G2/G3 公开夹具和盲测通过；G5/G6a/G7/G8/G13/G15 行为通过。
 - 报告能区分已确认根因、根因假设和依据不足。
-- 3 个已启用官方问题卡片可按 ID 检索并展示真实来源。
+- 2 个已启用官方问题卡片可按 ID 检索并展示真实来源。
 - 生产隔离、共享 Key 和网络权限已核查。
 - 性能抽样满足 §3.2；已知缺口写入使用说明。
 
@@ -334,7 +332,6 @@ G1/G2/G3 各包含 1 个公开夹具和 1 个盲测变体。“部分正确”�
 
 | 错误码 | 官方含义 | 用途 |
 |--------|----------|------|
-| 9005 | Region is unavailable | G1 / `P-AVAIL-9005` |
 | 1205 | Lock wait timeout | G3 选锁时启用 |
 | 1213 | Deadlock | G3 选锁时启用 |
 | 9007 | Write conflict | G3 选写冲突时启用 |
@@ -346,13 +343,12 @@ G1/G2/G3 各包含 1 个公开夹具和 1 个盲测变体。“部分正确”�
 
 | ID | 官方问题模式 | 来源 | 解决建议摘要 | v1 |
 |----|--------------|------|--------------|----|
-| `P-AVAIL-9005` | 客户端报 Region is Unavailable | `tidb-troubleshooting-map.md`：[官网 v7.5 §1.1](https://docs.pingcap.com/zh/tidb/v7.5/tidb-troubleshooting-map/#11-客户端报-region-is-unavailable-错误)；`error-codes.md`：[官网 v7.5 错误码（9005）](https://docs.pingcap.com/zh/tidb/v7.5/error-codes/#错误码) | 排查 TiKV busy、not leader、超时或无 Leader | G1 Must |
 | `P-READ-SLOW` | 慢查询 | `tidb-troubleshooting-map.md`：[官网 v7.5 §3.5](https://docs.pingcap.com/zh/tidb/v7.5/tidb-troubleshooting-map/#35-慢查询问题)；[慢查询日志](https://docs.pingcap.com/zh/tidb/v7.5/identify-slow-queries/)、[分析慢查询](https://docs.pingcap.com/zh/tidb/v7.5/analyze-slow-queries/) | 定位瓶颈后执行对应官方分析步骤 | G2 Must |
 | `P-LOCK` | 锁冲突、死锁、Lock wait timeout | `tidb-troubleshooting-map.md`：[官网 v7.5 §3.8](https://docs.pingcap.com/zh/tidb/v7.5/tidb-troubleshooting-map/#38-锁冲突问题)；`troubleshoot-lock-conflicts.md`：[官网 v7.5 锁冲突问题处理](https://docs.pingcap.com/zh/tidb/v7.5/troubleshoot-lock-conflicts/) | 按乐观/悲观事务分支处理 | G3 选锁 |
 | `P-WRITE-CONFLICT` | 写写冲突 | `troubleshoot-write-conflicts.md`：[官网 v7.5 写写冲突排查](https://docs.pingcap.com/zh/tidb/v7.5/troubleshoot-write-conflicts/)、[解决方法](https://docs.pingcap.com/zh/tidb/v7.5/troubleshoot-write-conflicts/#如何解决写写冲突问题)；`error-codes.md`：[9007/8005](https://docs.pingcap.com/zh/tidb/v7.5/error-codes/#错误码) | 识别冲突数据，应用侧重试或调整事务 | G3 选写冲突 |
 | `P-WRITE-SLOW` | TiKV 写入慢 | `tidb-troubleshooting-map.md`：[官网 v7.5 §4.5](https://docs.pingcap.com/zh/tidb/v7.5/tidb-troubleshooting-map/#45-tikv-写入慢) | 按 scheduler、append log、raftstore、apply 分支排查 | G3 选写入慢 |
 
-P0 选择一个 G3 方向后，知识库共导入 G1 一条、G2 一条、G3 一条，共 3 个问题卡片。
+P0 选择一个 G3 方向后，知识库共导入 G2 一条、G3 一条，共 2 个问题卡片。
 
 ## 附录 D. 文档维护
 
@@ -360,7 +356,8 @@ P0 选择一个 G3 方向后，知识库共导入 G1 一条、G2 一条、G3 一
 |------|------|------|
 | v1.21 | 2026-08-25 | 收窄附录问题点并删除独立演进章节 |
 | v1.22 | 2026-08-25 | 保留两份文档并系统精简：3 个工具、六段报告、最小 RAG、无缓存/回合计数/复杂哈希；修正慢日志和性能验收语义；补充问题卡片的官网 v7.5 链接 |
-| v1.23 | 2026-08-25 | G1 收窄为 9005 / Region is Unavailable；同步收窄错误码闭集；已启用问题卡片减至 3 个 |
+| v1.23 | 2026-08-25 | 收窄可用性诊断范围并同步收窄错误码闭集 |
+| v1.24 | 2026-08-25 | 移除可用性诊断方向及其错误码、问题卡片、指标 profile 和验收用例；已启用问题卡片减至 2 个 |
 
 历史版本详见 Git 记录。
 
