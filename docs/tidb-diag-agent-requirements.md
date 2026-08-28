@@ -122,14 +122,65 @@ Agent 只能选择 profile 或受控参数，不得传入任意 PromQL 或 SLS S
 
 ```mermaid
 flowchart TB
-    Start["用户选择集群/时间并提供文字线索"] --> Validate["校验参数"]
-    Validate -->|缺失或冲突| Insufficient["信息不足报告"]
-    Validate -->|有效| Route["确定粗分类或 health"]
-    Route --> Evidence["查询相关指标及日志/慢查"]
-    Evidence --> Card["读取已启用问题卡片"]
-    Card --> Decide["判断证据与问题卡片是否一致"]
-    Decide --> Report["六段报告"]
+    Start["用户选择集群/时间并提供文字线索<br/>【驱动：用户】"] --> Validate["校验参数<br/>【驱动：表单 / Agent / API】"]
+    Validate -->|缺失或冲突| Insufficient["信息不足报告<br/>【驱动：Agent】"]
+    Validate -->|有效| Route["确定粗分类或 health<br/>【驱动：Agent】"]
+    Route --> Evidence["查询相关指标及日志/慢查<br/>【驱动：Agent 决策 · API 执行】"]
+    Evidence --> Card["读取已启用问题卡片<br/>【驱动：Prompt 内嵌】"]
+    Card --> Decide["判断证据与问题卡片是否一致<br/>【驱动：Agent】"]
+    Decide --> Report["六段报告<br/>【驱动：Agent】"]
 ```
+
+驱动方标识说明：
+
+| 标识 | 含义 |
+|------|------|
+| **用户** | 运维/DBA 选择集群、时间窗并提供文字线索；参数冲突时确认 |
+| **表单 / Agent / API** | Dify 表单禁缺参提交；Agent 处理对话冲突；API 硬校验集群与时间窗 |
+| **Agent** | Dify Agent + 千问：路由、工具选择、证据归纳、报告生成 |
+| **Agent 决策 · API 执行** | Agent 选 profile 和工具；Diagnostic API 查 Prometheus / SLS |
+| **Prompt 内嵌** | `P-READ-SLOW` / `P-LOCK` 部署时写入 Prompt，非运行时检索 |
+
+#### 诊断示例：G1 查询变慢
+
+以下示例对应 §4.2 金标准 **G1**，展示标准流程在一次真实输入下如何落地。工具调用顺序不唯一；图中路径仅为一种合理展开。
+
+**场景输入**
+
+| 项 | 值 |
+|----|-----|
+| `cluster_id` | `prod-a` |
+| `time_mode` | `recent_15m` |
+| 文字线索 | 「订单查询 P99 从 200ms 升到 3s，09:10 左右开始」 |
+
+```mermaid
+flowchart TB
+    Input["用户输入<br/>prod-a · recent_15m<br/>线索：订单查询 P99 升高<br/>【驱动：用户】"] --> Validate["校验参数 → 有效<br/>API 解析绝对时间窗<br/>【驱动：表单 / Agent / API】"]
+    Validate --> Route["Agent 路由 → G2 读性能<br/>选定 profile=read<br/>【驱动：Agent】"]
+    Route --> Metrics["query_metrics(profile=read)<br/>Prometheus：读延迟 / P99 等<br/>【驱动：Agent 决策 · API 执行】"]
+    Route --> Slow["analyze_slow_query_sample<br/>SLS：样本内 Top N 慢 SQL<br/>【驱动：Agent 决策 · API 执行】"]
+    Metrics --> Card["引用 Prompt 内 P-READ-SLOW<br/>【驱动：Prompt 内嵌】"]
+    Slow --> Card
+    Card --> Decide{"read 指标异常<br/>+ 慢日志样本一致?"}
+    Decide -->|两类观测一致| Confirmed["结论：已确认问题模式<br/>匹配 P-READ-SLOW<br/>【驱动：Agent】"]
+    Decide -->|仅一类或不足| Hypothesis["结论：根因假设<br/>【驱动：Agent】"]
+    Confirmed --> Report["六段报告<br/>§5 改写官方建议<br/>Dashboard / EXPLAIN 标人工<br/>【驱动：Agent】"]
+    Hypothesis --> Report
+```
+
+示例与 §2.3 标准节点的对应关系：
+
+| 标准节点 | 本示例中的具体动作 |
+|----------|-------------------|
+| 用户选择集群/时间并提供文字线索 | 选 `prod-a`、`recent_15m`，描述 P99 升高（线索仅用于路由） |
+| 校验参数 | 表单必填项齐全；API 校验集群并将 `recent_15m` 解析为绝对窗口 |
+| 确定粗分类或 health | 线索指向查询变慢 → Agent 选 `read` profile（G2 读性能） |
+| 查询相关指标及日志/慢查 | `query_metrics(read)` + `analyze_slow_query_sample`；后续工具复用同一绝对窗口 |
+| 读取已启用问题卡片 | 从 Prompt 引用 `P-READ-SLOW`，非第四次工具调用 |
+| 判断证据与问题卡片是否一致 | read 指标异常且慢日志 Top N 支持同一模式 → **已确认问题模式**；仅一类命中 → **根因假设** |
+| 六段报告 | 输出证据、匹配卡片、分级理由；官方步骤中 Dashboard / EXPLAIN 标为人工操作 |
+
+若同一输入下 Prometheus 与 SLS 均失败，则按 §2.7 降级，不得升为已确认问题模式。若用户线索与观测冲突，按 §2.3 决策规则以系统观测为准（G4）。
 
 | 状态 | 产品行为 |
 |------|----------|
